@@ -1,0 +1,485 @@
+/* See the Tailwind configuration guide for advanced usage
+   https://tailwindcss.com/docs/configuration */
+
+@import "tailwindcss" source(none);
+@import "phoenix-colocated/marsad/colocated.css";
+@source "../css";
+@source "../js";
+@source "../../lib/marsad_web";
+/* Required for Tailwind to automatically pick up changes in colocated CSS files in dev */
+@source "../../_build/dev/phoenix-colocated/marsad/*/";
+
+/* xterm.js base styles — must load before our terminal overrides */
+@import "../vendor/xterm.css";
+
+/* CodeMirror base and themes — for file previews */
+@import "../node_modules/codemirror/lib/codemirror.css";
+@import "../node_modules/codemirror/theme/material.css";
+@import "../node_modules/codemirror/theme/eclipse.css";
+
+/* A Tailwind plugin that makes "hero-#{ICON}" classes available.
+   The heroicons installation itself is managed by your mix.exs */
+@plugin "../vendor/heroicons";
+
+/* daisyUI Tailwind Plugin. */
+@plugin "daisyui/packages/bundle/daisyui" {
+  themes: false;
+}
+
+/* daisyUI theme plugin.
+  We ship with two themes, a light one inspired on Phoenix colors and a dark one inspired
+  on Elixir colors. Build your own at: https://daisyui.com/theme-generator/ */
+@plugin "daisyui/packages/bundle/daisyui-theme" {
+  name: "dark";
+  default: false;
+  prefersdark: true;
+  color-scheme: "dark";
+  --color-base-100: oklch(17% 0.006 260);
+  --color-base-200: oklch(13% 0.005 260);
+  --color-base-300: oklch(10% 0.004 260);
+  --color-base-content: oklch(97.807% 0.029 256.847);
+  --color-primary: oklch(58% 0.233 277.117);
+  --color-primary-content: oklch(96% 0.018 272.314);
+  --color-secondary: oklch(58% 0.233 277.117);
+  --color-secondary-content: oklch(96% 0.018 272.314);
+  --color-accent: oklch(60% 0.25 292.717);
+  --color-accent-content: oklch(96% 0.016 293.756);
+  --color-neutral: oklch(22% 0.008 260);
+  --color-neutral-content: oklch(98% 0.003 247.858);
+  --color-info: oklch(58% 0.158 241.966);
+  --color-info-content: oklch(97% 0.013 236.62);
+  --color-success: oklch(60% 0.118 184.704);
+  --color-success-content: oklch(98% 0.014 180.72);
+  --color-warning: oklch(66% 0.179 58.318);
+  --color-warning-content: oklch(98% 0.022 95.277);
+  --color-error: oklch(58% 0.253 17.585);
+  --color-error-content: oklch(96% 0.015 12.422);
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1.5px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@plugin "daisyui/packages/bundle/daisyui-theme" {
+  name: "light";
+  default: true;
+  prefersdark: false;
+  color-scheme: "light";
+  --color-base-100: oklch(98% 0 0);
+  --color-base-200: oklch(96% 0.001 286.375);
+  --color-base-300: oklch(92% 0.004 286.32);
+  --color-base-content: oklch(21% 0.006 285.885);
+  --color-primary: oklch(70% 0.213 47.604);
+  --color-primary-content: oklch(98% 0.016 73.684);
+  --color-secondary: oklch(55% 0.027 264.364);
+  --color-secondary-content: oklch(98% 0.002 247.839);
+  --color-accent: oklch(0% 0 0);
+  --color-accent-content: oklch(100% 0 0);
+  --color-neutral: oklch(44% 0.017 285.786);
+  --color-neutral-content: oklch(98% 0 0);
+  --color-info: oklch(62% 0.214 259.815);
+  --color-info-content: oklch(97% 0.014 254.604);
+  --color-success: oklch(70% 0.14 182.503);
+  --color-success-content: oklch(98% 0.014 180.72);
+  --color-warning: oklch(66% 0.179 58.318);
+  --color-warning-content: oklch(98% 0.022 95.277);
+  --color-error: oklch(58% 0.253 17.585);
+  --color-error-content: oklch(96% 0.015 12.422);
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1.5px;
+  --depth: 1;
+  --noise: 0;
+}
+
+/* Add variants based on LiveView classes */
+@custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
+@custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
+@custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
+
+/* Use the data attribute for dark mode  */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* Make LiveView wrapper divs transparent for layout */
+[data-phx-session], [data-phx-teleported-src] { display: contents }
+
+/* Mini-OS desktop — quiet professional backdrop (dark) */
+.marsad-desktop {
+  font-family: Inter, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  background:
+    radial-gradient(
+      720px 340px at 50% -8%,
+      color-mix(in srgb, var(--marsad-accent, #0369a1) 9%, transparent),
+      transparent 65%
+    ),
+    linear-gradient(180deg, #101214 0%, #1a1d20 100%);
+}
+
+/* Light mode: clean neutral paper (attr sits on the shell itself) */
+.marsad-desktop[data-theme="light"] {
+  background:
+    radial-gradient(
+      720px 340px at 50% -8%,
+      color-mix(in srgb, var(--marsad-accent, #0369a1) 7%, transparent),
+      transparent 65%
+    ),
+    linear-gradient(180deg, #f4f6fa 0%, #e9edf3 100%);
+}
+
+/* Frosted-glass surfaces: blur 15px, hairline border */
+.marsad-glass {
+  background: rgba(20, 22, 24, 0.62);
+  backdrop-filter: blur(15px) saturate(1.3);
+  -webkit-backdrop-filter: blur(15px) saturate(1.3);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.marsad-glass-strong {
+  background: rgba(18, 20, 22, 0.88);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+/* NOTE: data-theme lives on .marsad-desktop itself, so light overrides
+   must match the shell element — never `[data-theme="light"] .marsad-x`. */
+.marsad-desktop[data-theme="light"] .marsad-glass {
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+.marsad-desktop[data-theme="light"] .marsad-glass-strong {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+/* Semantic status text — explicit per-theme (the tailwind `dark:`
+   variant leaks from ancestor html[data-theme], so avoid it here). */
+.st-online {
+  color: #047857;
+}
+
+.marsad-desktop[data-theme="dark"] .st-online {
+  color: #4ade80;
+}
+
+.st-offline {
+  color: #b91c1c;
+}
+
+.marsad-desktop[data-theme="dark"] .st-offline {
+  color: #f87171;
+}
+
+.st-warn {
+  color: #b45309;
+}
+
+.marsad-desktop[data-theme="dark"] .st-warn {
+  color: #fbbf24;
+}
+
+/* Accent system — driven by --marsad-accent / --marsad-accent-ink from settings */
+.acc-bg {
+  background-color: var(--marsad-accent, #0369a1);
+  color: var(--marsad-accent-ink, #ffffff);
+}
+
+.acc-soft {
+  background-color: color-mix(in srgb, var(--marsad-accent, #0369a1) 12%, transparent);
+  color: var(--marsad-accent, #0369a1);
+}
+
+.marsad-desktop[data-theme="dark"] .acc-soft {
+  color: color-mix(in srgb, var(--marsad-accent, #0369a1) 55%, white);
+}
+
+.acc-text {
+  color: var(--marsad-accent, #0369a1);
+}
+
+.marsad-desktop[data-theme="dark"] .acc-text {
+  color: color-mix(in srgb, var(--marsad-accent, #0369a1) 60%, white);
+}
+
+.acc-border {
+  border-color: color-mix(in srgb, var(--marsad-accent, #0369a1) 45%, transparent);
+}
+
+.acc-glow {
+  box-shadow: 0 0 24px -8px var(--marsad-accent, #0369a1);
+}
+
+.marsad-terminal-wrap {
+  position: relative;
+  overflow: hidden;
+  background: #020617;
+}
+
+.marsad-desktop[data-theme="light"] .marsad-terminal-wrap {
+  background: #ffffff;
+}
+
+.marsad-terminal-wrap .xterm {
+  height: 100%;
+  padding: 12px 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-variant-ligatures: none;
+}
+
+/* Let the xterm canvas keep its own selection model but keep viewport visible */
+.marsad-terminal-wrap .xterm-viewport {
+  background: transparent !important;
+  /* Improve selection UX: smooth scrolling and native-feel */
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.marsad-terminal-wrap .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+.marsad-terminal-wrap .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.marsad-terminal-wrap .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.35);
+  border-radius: 8px;
+  border: 2px solid #020617;
+}
+
+.marsad-desktop[data-theme="light"] .marsad-terminal-wrap .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(2, 132, 199, 0.28);
+  border-color: #ffffff;
+}
+
+/* Helper textarea should not steal selection */
+.marsad-terminal-wrap .xterm-helper-textarea {
+  /* keep default off-screen positioning from xterm.css */
+}
+
+/* Improve focus ring for accessibility without breaking selection */
+.marsad-terminal-wrap .xterm:focus {
+  outline: none;
+}
+
+.marsad-terminal-wrap .xterm:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: -2px;
+}
+
+.marsad-window-shadow {
+  box-shadow:
+    0 32px 80px -16px rgba(0, 0, 0, 0.65),
+    0 4px 16px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(148, 163, 184, 0.08),
+    0 0 48px -24px rgba(56, 189, 248, 0.25);
+}
+
+/* Panel switch: quiet fade, exits faster than enters */
+@keyframes marsad-window-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.marsad-window-in {
+  animation: marsad-window-in 150ms ease-out;
+}
+
+/* Browser-like tab: active tab carries an accent underline */
+.marsad-tab {
+  position: relative;
+}
+
+.marsad-tab-active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--marsad-accent, #0369a1);
+}
+
+/* Dock icons stagger in on first paint */
+@keyframes marsad-icon-in {
+  from {
+    opacity: 0;
+    transform: translateX(-12px) scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.marsad-icon-in {
+  animation: marsad-icon-in 380ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+}
+
+/* Traffic-light symbols appear on titlebar hover */
+.marsad-lights button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  line-height: 1;
+  color: rgba(2, 6, 23, 0);
+  transition: color 120ms ease;
+}
+
+.marsad-lights:hover button {
+  color: rgba(2, 6, 23, 0.75);
+}
+
+/* Slim scrollbars for panels */
+.marsad-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.marsad-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 8px;
+}
+
+.marsad-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Visible keyboard focus everywhere on the desktop */
+.marsad-desktop :focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Elegant loading: shimmer skeletons + click spinners */
+@keyframes marsad-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.marsad-shimmer {
+  background: linear-gradient(
+    100deg,
+    rgba(148, 163, 184, 0.1) 40%,
+    rgba(148, 163, 184, 0.3) 50%,
+    rgba(148, 163, 184, 0.1) 60%
+  );
+  background-size: 200% 100%;
+  animation: marsad-shimmer 1.5s linear infinite;
+}
+
+@keyframes marsad-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Phoenix adds .phx-click-loading on the clicked element while the
+   roundtrip is in flight — spin any marked icon inside it. */
+.phx-click-loading .marsad-spin-target {
+  animation: marsad-rotate 0.9s linear infinite;
+}
+
+/* CodeMirror — professional code editor (matches terminal clarity) */
+.marsad-code-editor-wrap {
+  border-radius: 0 0 0.75rem 0.75rem;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-top: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 68vh;
+  min-height: 220px;
+}
+
+.CodeMirror {
+  flex: 1 1 auto;
+  height: auto !important;
+  min-height: 220px;
+  max-height: none;
+  font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.CodeMirror-scroll {
+  min-height: 220px;
+  max-height: 68vh;
+  overflow: auto !important;
+}
+
+.CodeMirror-sizer {
+  min-height: 220px !important;
+}
+
+.CodeMirror-vscrollbar,
+.CodeMirror-hscrollbar {
+  outline: none;
+}
+
+.CodeMirror-focused {
+  outline: none;
+}
+
+.CodeMirror .CodeMirror-gutters {
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.marsad-desktop[data-theme="dark"] .CodeMirror {
+  background: #0f172a !important;
+}
+
+.marsad-desktop[data-theme="light"] .CodeMirror {
+  background: #ffffff !important;
+}
+
+/* Respect reduced motion: render final states immediately */
+@media (prefers-reduced-motion: reduce) {
+  .marsad-window-in,
+  .marsad-icon-in {
+    animation: none;
+  }
+
+  .marsad-shimmer {
+    animation: none;
+  }
+
+  .marsad-desktop .animate-ping {
+    animation: none;
+  }
+
+  .marsad-desktop * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* This file is for your main application CSS */
