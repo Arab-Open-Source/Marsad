@@ -138,7 +138,7 @@ defmodule Marsad.Fleet do
     end
   end
 
-  @doc "Reads up to `max_bytes` of a remote file."
+  @doc "Reads up to `max_bytes` of a remote file. Pass `:infinity` for full-file download (chunked, binary-safe)."
   def read_file(server_id, path, max_bytes \\ 200_000) do
     with :ok <- ensure_session(server_id),
          {:ok, result} <-
@@ -147,11 +147,23 @@ defmodule Marsad.Fleet do
     end
   end
 
-  @doc "Writes data to a remote path."
+  @doc "Writes data to a remote path. Chunked, so any size/type is safe."
   def write_file(server_id, path, data) do
     with :ok <- ensure_session(server_id),
          {:ok, result} <-
            ServerSession.sftp(server_id, &Marsad.SSH.SshAdapter.write_file(&1, path, data)) do
+      result
+    end
+  end
+
+  @doc "Streams a local tmp file (from `allow_upload`) to a remote path without loading it fully. Use this for large uploads."
+  def upload_file(server_id, remote_path, local_path) do
+    with :ok <- ensure_session(server_id),
+         {:ok, result} <-
+           ServerSession.sftp(
+             server_id,
+             &Marsad.SSH.SshAdapter.upload_file(&1, remote_path, local_path)
+           ) do
       result
     end
   end

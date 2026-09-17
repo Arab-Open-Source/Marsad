@@ -53,6 +53,22 @@ export const CodeEditor = {
       },
     })
 
+    this._lastPath = this.el.dataset.path
+    this._savedContent = this.editor.getValue()
+    this._dirty = false
+    if (!readOnly) {
+      this.editor.on("change", () => this._notifyDirty())
+    }
+
+    this.handleEvent("code_editor_saved", ({id, content}) => {
+      if (id !== this.el.id) return
+      this._savedContent = content
+      this.textarea.value = content
+      // The server cleared editing; re-assert it if typing continued during save.
+      this._dirty = false
+      this._notifyDirty()
+    })
+
     // Refresh after mount (needed when inside hidden tab)
     setTimeout(() => this.editor.refresh(), 50)
 
@@ -107,9 +123,6 @@ export const CodeEditor = {
 
     // Direct Save button handling (simplified UX — no Edit/Cancel toggle)
     this._attachSaveButton()
-    // Also handle any save button added later (LiveView re-render)
-    this._saveObserver = new MutationObserver(() => this._attachSaveButton())
-    this._saveObserver.observe(document.body, { childList: true, subtree: true })
 
     // Focus if editable
     if (!readOnly) {
@@ -118,40 +131,21 @@ export const CodeEditor = {
   },
 
   _attachSaveButton() {
-    const path = this.el.dataset.path
-    if (!path) return
-    // Find save buttons for this path (files, nginx, systemd)
-    const selectors = [
-      `button[data-save-path="${CSS.escape(path)}"]`,
-      `#save-files-${CSS.escape(path.replaceAll("/", "-"))}`,
-      `#save-nginx-${CSS.escape(path.replaceAll("/", "-"))}`,
-      `#save-systemd-${CSS.escape(path.replaceAll("/", "-"))}`,
-    ]
-    // Also try generic save buttons inside the same preview container
-    const container = this.el.closest(".border-t")?.parentElement || this.el.closest(".marsad-code-editor-wrap")?.parentElement || document
-    const buttons = container.querySelectorAll ? container.querySelectorAll("button[data-save-path]") : []
-    for (const btn of buttons) {
-      if (btn.dataset.savePath === path && !btn._codeEditorBound) {
-        btn._codeEditorBound = true
-        btn.addEventListener("click", (e) => {
-          e.preventDefault()
-          this.triggerSave()
-        })
+    const container = this.el.closest(".marsad-code-editor-wrap")?.parentElement
+    if (container === this._saveContainer) return
+    this._saveContainer?.removeEventListener("click", this._saveClickHandler)
+    this._saveContainer = container
+    if (!container) return
+
+    // Delegate so buttons inserted by later LiveView patches work too.
+    this._saveClickHandler = (event) => {
+      const button = event.target.closest("button[data-save-path]")
+      if (button && button.dataset.savePath === this.el.dataset.path) {
+        event.preventDefault()
+        this.triggerSave()
       }
     }
-    // Fallback: also check document for any button with matching data-save-path
-    for (const sel of selectors) {
-      try {
-        const btn = document.querySelector(sel)
-        if (btn && !btn._codeEditorBound) {
-          btn._codeEditorBound = true
-          btn.addEventListener("click", (e) => {
-            e.preventDefault()
-            this.triggerSave()
-          })
-        }
-      } catch (_e) {}
-    }
+    this._saveContainer.addEventListener("click", this._saveClickHandler)
   },
 
   updated() {
@@ -161,21 +155,13 @@ export const CodeEditor = {
     const newTheme = this.el.dataset.theme === "light" ? "eclipse" : "material"
     const newMode = this.el.dataset.language || "text/plain"
 
-    // Only update if changed and not dirty (user hasn't edited)
-    // We check if editor is dirty by comparing current value with textarea's value
-    // If LiveView changed the textarea's value (new file), we should update
-    if (newContent !== this.editor.getValue()) {
-      // If the editor is not focused or content is from server (new file), update
-      // We use a simple heuristic: if the newContent is different and the editor's content
-      // is not the same as the previous textarea value, update.
-      // For now, just update if the path changed
-      const newPath = this.el.dataset.path
-      if (this._lastPath !== newPath || document.activeElement !== this.editor.getInputField()) {
-        this.editor.setValue(newContent)
-        this._lastPath = newPath
-      }
-    } else {
+    // Ignored textarea content can be stale during unrelated LiveView patches.
+    // Only an explicit reload or a different path may replace the document.
+    if (this._lastPath !== this.el.dataset.path) {
       this._lastPath = this.el.dataset.path
+      this._savedContent = newContent
+      this.editor.setValue(newContent)
+      this._dirty = false
     }
 
     if (this.editor.getOption("readOnly") !== newReadOnly) {
@@ -194,7 +180,17 @@ export const CodeEditor = {
     this._attachSaveButton()
   },
 
+  _notifyDirty() {
+    const dirty = this.editor.getValue() !== this._savedContent
+    if (dirty === this._dirty) return
+    this._dirty = dirty
+    this.pushEvent("file-editor-dirty", {
+      path: this.el.dataset.path, editor_id: this.el.id, dirty
+    })
+  },
+
   destroyed() {
+    this._saveContainer?.removeEventListener("click", this._saveClickHandler)
     if (this._resizeObserver) this._resizeObserver.disconnect()
     if (this._io) this._io.disconnect()
     if (this._saveObserver) this._saveObserver.disconnect()

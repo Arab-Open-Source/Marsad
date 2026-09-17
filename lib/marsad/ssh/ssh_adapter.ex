@@ -116,25 +116,119 @@ defmodule Marsad.SSH.SshAdapter do
     end
   end
 
-  @doc "Reads up to `max_bytes` of a file (never pulls more than needed)."
-  @spec read_file(pid(), binary(), pos_integer()) :: {:ok, binary()} | {:error, term()}
-  def read_file(channel, path, max_bytes \\ 200_000) do
-    with {:ok, handle} <- :ssh_sftp.open(channel, to_charlist(path), [:read, :binary]),
-         result <- :ssh_sftp.read(channel, handle, max_bytes) do
-      :ssh_sftp.close(channel, handle)
+  @doc "Reads up to `max_bytes` of a file (never pulls more than needed). Supports `:infinity` for full-file download; always returns raw binary (no `to_string` conversion) so binary files survive intact."
+  @spec read_file(pid(), binary(), pos_integer() | :infinity) ::
+          {:ok, binary()} | {:error, term()}
+  def read_file(channel, path, max_bytes \\ 200_000)
 
-      case result do
-        {:ok, data} -> {:ok, to_string(data)}
-        :eof -> {:ok, ""}
-        {:error, _} = error -> error
-      end
+  def read_file(channel, path, :infinity) do
+    with {:ok, handle} <- :ssh_sftp.open(channel, to_charlist(path), [:read, :binary]) do
+      result = read_all_chunks(channel, handle, <<>>)
+      :ssh_sftp.close(channel, handle)
+      result
     end
   end
 
-  @doc "Writes a whole binary to a remote path (creates/truncates)."
+  def read_file(channel, path, max_bytes) when is_integer(max_bytes) and max_bytes >= 0 do
+    with {:ok, handle} <- :ssh_sftp.open(channel, to_charlist(path), [:read, :binary]) do
+      result = read_limited_chunks(channel, handle, max_bytes, <<>>)
+      :ssh_sftp.close(channel, handle)
+      result
+    end
+  end
+
+  defp read_limited_chunks(_channel, _handle, 0, acc), do: {:ok, acc}
+
+  defp read_limited_chunks(channel, handle, remaining, acc) when remaining > 0 do
+    chunk = min(65_536, remaining)
+
+    case :ssh_sftp.read(channel, handle, chunk) do
+      {:ok, data} ->
+        bin = IO.iodata_to_binary(data)
+        next_acc = <<acc::binary, bin::binary>>
+
+        if byte_size(bin) < chunk do
+          {:ok, next_acc}
+        else
+          read_limited_chunks(channel, handle, remaining - byte_size(bin), next_acc)
+        end
+
+      :eof ->
+        {:ok, acc}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp read_all_chunks(channel, handle, acc) do
+    case :ssh_sftp.read(channel, handle, 65_536) do
+      {:ok, data} ->
+        bin = IO.iodata_to_binary(data)
+        next_acc = <<acc::binary, bin::binary>>
+
+        if byte_size(bin) < 65_536 do
+          {:ok, next_acc}
+        else
+          read_all_chunks(channel, handle, next_acc)
+        end
+
+      :eof ->
+        {:ok, acc}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc "Writes a whole binary to a remote path (creates/truncates). Chunked so large files (>32KB) don't exceed SSH packet limits and memory stays bounded."
   @spec write_file(pid(), binary(), binary()) :: :ok | {:error, term()}
-  def write_file(channel, path, data) do
-    :ssh_sftp.write_file(channel, to_charlist(path), data)
+  def write_file(channel, path, data) when is_binary(data) do
+    case :ssh_sftp.open(channel, to_charlist(path), [:write, :binary, :creat, :trunc]) do
+      {:ok, handle} ->
+        result = write_chunks(channel, handle, data, 0)
+        :ssh_sftp.close(channel, handle)
+        result
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp write_chunks(_channel, _handle, data, offset) when offset >= byte_size(data), do: :ok
+
+  defp write_chunks(channel, handle, data, offset) do
+    chunk_size = 32_768
+    remaining = byte_size(data) - offset
+    len = min(chunk_size, remaining)
+    chunk = binary_part(data, offset, len)
+
+    case :ssh_sftp.write(channel, handle, chunk) do
+      :ok -> write_chunks(channel, handle, data, offset + len)
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc "Streams a local file (at `local_path`) to a remote path without loading it fully into memory. Used for `allow_upload` where the tmp file may be 100s of MB."
+  @spec upload_file(pid(), binary(), binary()) :: :ok | {:error, term()}
+  def upload_file(channel, remote_path, local_path) do
+    case :ssh_sftp.open(channel, to_charlist(remote_path), [:write, :binary, :creat, :trunc]) do
+      {:ok, handle} ->
+        result =
+          File.stream!(local_path, [], 65_536)
+          |> Enum.reduce_while(:ok, fn chunk, :ok ->
+            case :ssh_sftp.write(channel, handle, chunk) do
+              :ok -> {:cont, :ok}
+              {:error, _} = error -> {:halt, error}
+            end
+          end)
+
+        :ssh_sftp.close(channel, handle)
+        result
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   @doc "Creates a directory (including parents, mkdir -p style)."

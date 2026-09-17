@@ -16,6 +16,7 @@ defmodule Marsad.Fleet.ServerSession do
   alias Marsad.SSH.SshAdapter
 
   @exec_timeout 30_000
+  @sftp_timeout 45_000
 
   def start_link(%Fleet.Server{id: id} = server) do
     GenServer.start_link(__MODULE__, server, name: via(id))
@@ -25,12 +26,12 @@ defmodule Marsad.Fleet.ServerSession do
 
   @doc "Runs a command on the server, connecting first if needed."
   def exec(server_id, command, timeout \\ @exec_timeout) do
-    GenServer.call(via(server_id), {:exec, command, timeout}, timeout + 5_000)
+    GenServer.call(via(server_id), {:exec, command, timeout}, timeout + 15_000)
   end
 
   @doc "Runs `fun` with an SFTP channel, connecting first if needed."
   def sftp(server_id, fun) when is_function(fun, 1) do
-    GenServer.call(via(server_id), {:sftp, fun}, @exec_timeout + 5_000)
+    GenServer.call(via(server_id), {:sftp, fun}, @sftp_timeout + 10_000)
   end
 
   @doc "Current connection state without touching the network."
@@ -132,6 +133,16 @@ defmodule Marsad.Fleet.ServerSession do
       :error -> {:error, :cannot_decrypt_secret}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @impl true
+  def handle_info({:ssh_cm, _conn, _msg}, state) do
+    # Late channel close / data messages arriving after timeout - ignore
+    {:noreply, state}
+  end
+
+  def handle_info(_msg, state) do
+    {:noreply, state}
   end
 
   @impl true

@@ -8,8 +8,10 @@ defmodule MarsadWeb.DesktopLive do
   alias Marsad.Fleet
   alias Marsad.Fleet.Server
   alias Marsad.Fleet.Services
+  alias Marsad.Repo.Retry
   alias Marsad.Settings
   alias MarsadWeb.Desktop.DockerPanel
+  alias MarsadWeb.Desktop.FilesComponent
   alias MarsadWeb.Desktop.NginxPanel
   alias MarsadWeb.Desktop.SystemdPanel
 
@@ -59,6 +61,9 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:file_browser, nil)
      |> assign(:files_load_ref, nil)
      |> assign(:files_pending_preview, nil)
+     |> assign(:files_filter, "")
+     |> assign(:files_search_results, nil)
+     |> assign(:files_search_ref, nil)
      |> assign(:mkdir_form, to_form(%{"dirname" => ""}))
      |> assign(:monitor_server_id, active_default(servers))
      |> assign(:metrics, %{})
@@ -78,10 +83,23 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:systemd, nil)
      |> assign(:nginx, nil)
      |> assign(:nginx_load_ref, nil)
-     |> allow_upload(:remote_files, accept: :any, max_entries: 3, max_file_size: 50_000_000)}
+     |> allow_upload(:remote_files,
+       accept: :any,
+       max_entries: 10,
+       max_file_size: 1_000_000_000,
+       chunk_size: 64_000,
+       chunk_timeout: 120_000,
+       auto_upload: false
+     )
+     |> allow_upload(:remote_folder,
+       accept: :any,
+       max_entries: 100,
+       max_file_size: 1_000_000_000,
+       chunk_size: 64_000,
+       chunk_timeout: 120_000,
+       auto_upload: false
+     )}
   end
-
-  # -- Tabs (browser-like, state-preserving) --------------------------------
 
   @impl true
   def handle_event("open-app", %{"app" => "terminal"}, socket) do
@@ -143,8 +161,6 @@ defmodule MarsadWeb.DesktopLive do
      |> open_window("terminal-#{server_id}", "terminal", server_id)}
   end
 
-  # -- Servers app --------------------------------------------------------
-
   def handle_event("new-server", _params, socket) do
     {:noreply,
      socket
@@ -176,10 +192,12 @@ defmodule MarsadWeb.DesktopLive do
 
   def handle_event("save-server", %{"server" => params}, socket) do
     result =
-      case socket.assigns.editing_server do
-        nil -> Fleet.create_server(params)
-        server -> Fleet.update_server(server, params)
-      end
+      Retry.retry_db(fn ->
+        case socket.assigns.editing_server do
+          nil -> Fleet.create_server(params)
+          server -> Fleet.update_server(server, params)
+        end
+      end)
 
     case result do
       {:ok, _server} ->
@@ -191,8 +209,11 @@ defmodule MarsadWeb.DesktopLive do
          |> assign(:server_form, to_form(Fleet.change_server(%Server{})))
          |> put_flash(:info, "Server saved.")}
 
-      {:error, changeset} ->
+      {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign(socket, :server_form, to_form(changeset, action: :validate))}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Save failed: #{inspect(reason)} — try again")}
     end
   end
 
@@ -234,39 +255,134 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
-  # -- File explorer (SFTP) -------------------------------------------------
-
   def handle_event("files-server", %{"server_id" => ""}, socket) do
-    {:noreply, assign(socket, :file_browser, nil)}
+    {:noreply,
+     socket
+     |> assign(:active_server_id, nil)
+     |> assign(:file_browser, nil)
+     |> assign(:files_filter, "")
+     |> assign(:files_search_results, nil)
+     |> assign(:files_search_ref, nil)}
   end
 
   def handle_event("files-server", %{"server_id" => id}, socket) do
-    {:noreply, load_browser(socket, String.to_integer(id), nil)}
+    server_id = String.to_integer(id)
+
+    {:noreply,
+     socket
+     |> assign(:active_server_id, server_id)
+     |> assign(:files_filter, "")
+     |> assign(:files_search_results, nil)
+     |> assign(:files_search_ref, nil)
+     |> load_browser(server_id, nil)}
+  end
+
+  def handle_event("files-filter", %{"filter" => filter}, socket) do
+    handle_files_filter(String.trim(filter), socket)
+  end
+
+  def handle_event("files-clear-filter", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:files_filter, "")
+     |> assign(:files_search_results, nil)
+     |> assign(:files_search_ref, nil)}
   end
 
   def handle_event("files-refresh", _params, socket) do
     b = socket.assigns.file_browser
-    {:noreply, if(b, do: load_browser(socket, b.server_id, b.path), else: socket)}
+
+    {:noreply,
+     if(b,
+       do:
+         socket
+         |> assign(:files_filter, "")
+         |> assign(:files_search_results, nil)
+         |> assign(:files_search_ref, nil)
+         |> load_browser(b.server_id, b.path),
+       else: socket
+     )}
+  end
+
+  def handle_event("file-editor-dirty", %{"path" => path} = params, socket) do
+    dirty = Map.get(params, "dirty", true)
+    editor_id = params["editor_id"]
+
+    socket =
+      Enum.reduce(
+        [
+          {:file_browser, :preview, "files"},
+          {:nginx, :file_preview, "nginx"},
+          {:systemd, :unit_preview, "systemd"}
+        ],
+        socket,
+        fn {key, field, prefix}, acc ->
+          case acc.assigns[key] do
+            %{^field => %{path: ^path} = preview} = state ->
+              if editor_id == nil || editor_id == editor_id(prefix, path) do
+                assign(acc, key, Map.put(state, field, Map.put(preview, :editing, dirty)))
+              else
+                acc
+              end
+
+            _ ->
+              acc
+          end
+        end
+      )
+
+    {:noreply, socket}
   end
 
   def handle_event("files-up", _params, socket) do
     case socket.assigns.file_browser do
-      nil -> {:noreply, socket}
-      b -> {:noreply, load_browser(socket, b.server_id, Fleet.remote_parent(b.path))}
+      nil ->
+        {:noreply, socket}
+
+      b ->
+        {:noreply,
+         socket
+         |> assign(:files_filter, "")
+         |> assign(:files_search_results, nil)
+         |> assign(:files_search_ref, nil)
+         |> load_browser(b.server_id, Fleet.remote_parent(b.path))}
     end
   end
 
   def handle_event("files-cd", %{"path" => path}, socket) do
     case socket.assigns.file_browser do
-      nil -> {:noreply, socket}
-      b -> {:noreply, load_browser(socket, b.server_id, path)}
+      nil ->
+        {:noreply, socket}
+
+      b ->
+        {:noreply,
+         socket
+         |> assign(:files_filter, "")
+         |> assign(:files_search_results, nil)
+         |> assign(:files_search_ref, nil)
+         |> load_browser(b.server_id, path)}
     end
   end
 
   def handle_event("files-open", %{"name" => name, "type" => "dir"}, socket) do
     case socket.assigns.file_browser do
-      nil -> {:noreply, socket}
-      b -> {:noreply, load_browser(socket, b.server_id, Fleet.remote_join(b.path, name))}
+      nil ->
+        {:noreply, socket}
+
+      b ->
+        {:noreply,
+         socket
+         |> assign(:files_filter, "")
+         |> assign(:files_search_results, nil)
+         |> assign(:files_search_ref, nil)
+         |> load_browser(b.server_id, Fleet.remote_join(b.path, name))}
+    end
+  end
+
+  def handle_event("files-open-path", %{"path" => path}, socket) do
+    case socket.assigns.file_browser do
+      %{server_id: server_id} = browser -> open_file_preview(socket, browser, server_id, path)
+      _ -> {:noreply, socket}
     end
   end
 
@@ -278,50 +394,7 @@ defmodule MarsadWeb.DesktopLive do
       b ->
         path = Fleet.remote_join(b.path, name)
 
-        case Fleet.read_file(b.server_id, path, 500_000) do
-          {:ok, data} when byte_size(data) > 0 ->
-            preview =
-              if String.valid?(data) do
-                %{
-                  path: path,
-                  text: data,
-                  full_text: data,
-                  truncated?: byte_size(data) >= 200_000,
-                  language: code_language(path),
-                  editing: false
-                }
-              else
-                %{
-                  path: path,
-                  text: "(binary file — preview unavailable)",
-                  full_text: data,
-                  truncated?: false,
-                  language: "text/plain",
-                  editing: false
-                }
-              end
-
-            {:noreply, assign(socket, :file_browser, %{b | preview: preview, error: nil})}
-
-          {:ok, _} ->
-            {:noreply,
-             assign(socket, :file_browser, %{
-               b
-               | preview: %{
-                   path: path,
-                   text: "(empty file)",
-                   full_text: "",
-                   truncated?: false,
-                   language: code_language(path),
-                   editing: false
-                 },
-                 error: nil
-             })}
-
-          {:error, reason} ->
-            {:noreply,
-             assign(socket, :file_browser, %{b | error: "Read failed: #{inspect(reason)}"})}
-        end
+        open_file_preview(socket, b, b.server_id, path)
     end
   end
 
@@ -349,7 +422,7 @@ defmodule MarsadWeb.DesktopLive do
     socket =
       case socket.assigns.file_browser do
         %{server_id: sid, preview: %{path: ^path}} = b ->
-          case Fleet.write_file(sid, path, content) do
+          case write_result(Fleet.write_file(sid, path, content)) do
             :ok ->
               lines = String.split(content, "\n")
 
@@ -379,7 +452,7 @@ defmodule MarsadWeb.DesktopLive do
       case socket.assigns.nginx do
         %{server_id: sid, file_preview: %{path: ^path} = fp} = n ->
           # Validate nginx path is under /etc/nginx
-          case Fleet.write_file(sid, path, content) do
+          case write_result(Fleet.write_file(sid, path, content)) do
             :ok ->
               fp = %{
                 fp
@@ -405,7 +478,7 @@ defmodule MarsadWeb.DesktopLive do
     socket =
       case socket.assigns.systemd do
         %{server_id: sid, unit_preview: %{path: ^path} = preview} = s ->
-          case Fleet.write_file(sid, path, content) do
+          case write_result(Fleet.write_file(sid, path, content)) do
             :ok ->
               # Reload systemd daemon after saving unit
               _ = Fleet.exec(sid, "systemctl daemon-reload 2>&1")
@@ -423,7 +496,7 @@ defmodule MarsadWeb.DesktopLive do
           # Fallback when path is unit name, resolve fragment path
           frag_path = Map.get(preview, :fragment_path) || path
 
-          case Fleet.write_file(sid, frag_path, content) do
+          case write_result(Fleet.write_file(sid, frag_path, content)) do
             :ok ->
               _ = Fleet.exec(sid, "systemctl daemon-reload 2>&1")
               preview = %{preview | text: content, full_text: content, editing: false}
@@ -480,29 +553,97 @@ defmodule MarsadWeb.DesktopLive do
   def handle_event("files-upload", _params, socket) do
     b = socket.assigns.file_browser
 
-    {done, socket} =
-      consume_uploaded_entries(socket, :remote_files, fn %{path: tmp}, entry ->
-        {:ok, {entry.client_name, File.read!(tmp)}}
-      end)
-
-    socket =
-      if b do
-        Enum.reduce(done, socket, fn {name, data}, acc ->
-          case Fleet.write_file(b.server_id, Fleet.remote_join(b.path, name), data) do
-            :ok -> load_browser(acc, b.server_id, b.path)
-            {:error, reason} -> put_browser_error(acc, "Upload failed: #{inspect(reason)}")
-          end
-        end)
-      else
+    if is_nil(b) || b.path == "…" do
+      socket =
         socket
-      end
+        |> cancel_all_uploads(:remote_files)
+        |> cancel_all_uploads(:remote_folder)
 
-    {:noreply, socket}
+      {:noreply, put_browser_error(socket, "No directory selected for upload")}
+    else
+      try do
+        upload_fn = fn %{path: tmp_path}, entry ->
+          relative =
+            case Map.get(entry, :client_relative_path) do
+              rel when is_binary(rel) and rel != "" -> rel
+              _ -> entry.client_name
+            end
+
+          remote_path = Fleet.remote_join(b.path, relative)
+          parent = Fleet.remote_parent(remote_path)
+
+          _ =
+            if parent != b.path and parent != "/" do
+              Fleet.make_dir(b.server_id, parent)
+            end
+
+          case Marsad.Files.write_result(Fleet.upload_file(b.server_id, remote_path, tmp_path)) do
+            :ok -> {:ok, {:ok, entry.client_name}}
+            {:error, reason} -> {:ok, {:error, entry.client_name, reason}}
+          end
+        end
+
+        {results_files, socket} = consume_uploaded_entries(socket, :remote_files, upload_fn)
+        {results_folder, socket} = consume_uploaded_entries(socket, :remote_folder, upload_fn)
+        results = results_files ++ results_folder
+
+        {oks, errors} = Enum.split_with(results, fn r -> match?({:ok, _}, r) end)
+
+        socket =
+          case errors do
+            [] ->
+              socket
+
+            _ ->
+              msg =
+                errors
+                |> Enum.map(fn {:error, name, reason} -> "#{name}: #{inspect(reason)}" end)
+                |> Enum.join(", ")
+
+              put_browser_error(socket, "Upload failed: #{msg}")
+          end
+
+        socket =
+          if oks != [] do
+            socket
+            |> put_flash(:info, "Uploaded #{length(oks)} file(s)")
+            |> load_browser(b.server_id, b.path)
+          else
+            socket
+          end
+
+        {:noreply, socket}
+      rescue
+        e -> {:noreply, put_browser_error(socket, "Upload failed: #{Exception.message(e)}")}
+      catch
+        _, reason -> {:noreply, put_browser_error(socket, "Upload failed: #{inspect(reason)}")}
+      end
+    end
   end
 
   def handle_event("validate-upload", _params, socket), do: {:noreply, socket}
 
-  # -- Monitoring -----------------------------------------------------------
+  def handle_event("cancel-upload", %{"ref" => ref}, socket) do
+    socket =
+      try do
+        cancel_upload(socket, :remote_files, ref)
+      rescue
+        _ -> socket
+      catch
+        _, _ -> socket
+      end
+
+    socket =
+      try do
+        cancel_upload(socket, :remote_folder, ref)
+      rescue
+        _ -> socket
+      catch
+        _, _ -> socket
+      end
+
+    {:noreply, socket}
+  end
 
   def handle_event("monitor-server", %{"server_id" => ""}, socket) do
     {:noreply, assign(socket, :monitor_server_id, nil)}
@@ -692,8 +833,6 @@ defmodule MarsadWeb.DesktopLive do
      |> put_flash(:info, "Auto-refresh every #{div(ms, 1000)}s — saved")}
   end
 
-  # -- Docker ---------------------------------------------------------------
-
   def handle_event("docker-server", %{"server_id" => ""}, socket) do
     {:noreply, assign(socket, :docker, nil)}
   end
@@ -790,8 +929,6 @@ defmodule MarsadWeb.DesktopLive do
   def handle_event("docker-close-stats", _params, socket) do
     {:noreply, assign_docker(socket, fn d -> %{d | stats: nil} end)}
   end
-
-  # -- systemd ----------------------------------------------------------------
 
   def handle_event("systemd-server", %{"server_id" => ""}, socket) do
     {:noreply, assign(socket, :systemd, nil)}
@@ -902,8 +1039,6 @@ defmodule MarsadWeb.DesktopLive do
   def handle_event("systemd-unit-close", _params, socket) do
     {:noreply, assign_systemd(socket, fn s -> %{s | unit_preview: nil} end)}
   end
-
-  # -- nginx ------------------------------------------------------------------
 
   def handle_event("nginx-server", %{"server_id" => ""}, socket) do
     {:noreply, assign(socket, :nginx, nil)}
@@ -1040,10 +1175,8 @@ defmodule MarsadWeb.DesktopLive do
     {:noreply, assign_nginx(socket, fn n -> %{n | files_filter: ""} end)}
   end
 
-  # -- Appearance settings ------------------------------------------------
-
   def handle_event("set-theme-mode", %{"mode" => mode}, socket) when mode in ["light", "dark"] do
-    {:ok, _} = Settings.put("theme_mode", mode)
+    Retry.retry_settings(fn -> Settings.put("theme_mode", mode) end)
 
     {:noreply,
      socket
@@ -1056,14 +1189,12 @@ defmodule MarsadWeb.DesktopLive do
 
   def handle_event("set-accent", %{"accent" => accent}, socket) do
     if Map.has_key?(Settings.accents(), accent) do
-      {:ok, _} = Settings.put("accent", accent)
+      Retry.retry_settings(fn -> Settings.put("accent", accent) end)
       {:noreply, assign(socket, :appearance, Settings.appearance())}
     else
       {:noreply, socket}
     end
   end
-
-  # -- Terminal wiring (xterm.js hook) ------------------------------------
 
   def handle_event("terminal_ready", %{"window_id" => wid}, socket) do
     window = find_window(socket, wid)
@@ -1120,7 +1251,76 @@ defmodule MarsadWeb.DesktopLive do
     {:noreply, push_event(socket, "terminal_copy_selection", %{window_id: wid})}
   end
 
-  # -- Private ------------------------------------------------------------
+  defp handle_files_filter(filter, socket) do
+    case socket.assigns.file_browser do
+      %{server_id: server_id} when is_binary(filter) ->
+        if String.length(filter) >= 2 do
+          if socket.assigns.files_filter == filter && socket.assigns.files_search_results != nil do
+            {:noreply, socket}
+          else
+            ref = make_ref()
+            pid = self()
+
+            Task.start(fn ->
+              send(
+                pid,
+                {:files_search_loaded, ref, server_id,
+                 Marsad.Files.search_remote_files(server_id, filter)}
+              )
+            end)
+
+            {:noreply,
+             socket
+             |> assign(:files_filter, filter)
+             |> assign(:files_search_results, :loading)
+             |> assign(:files_search_ref, ref)}
+          end
+        else
+          {:noreply,
+           socket
+           |> assign(:files_filter, filter)
+           |> assign(:files_search_results, nil)
+           |> assign(:files_search_ref, nil)}
+        end
+
+      _ ->
+        {:noreply,
+         socket
+         |> assign(:files_filter, filter)
+         |> assign(:files_search_results, nil)
+         |> assign(:files_search_ref, nil)}
+    end
+  end
+
+  defp editor_id(prefix, path), do: Marsad.Files.editor_id(prefix, path)
+  defp write_result(result), do: Marsad.Files.write_result(result)
+
+  defp open_file_preview(socket, browser, server_id, path) do
+    case Fleet.read_file(server_id, path, 15_000_000) do
+      {:ok, data} when byte_size(data) > 0 ->
+        preview = Marsad.Files.build_preview(path, data)
+        {:noreply, assign(socket, :file_browser, %{browser | preview: preview, error: nil})}
+
+      {:ok, _} ->
+        {:noreply,
+         assign(socket, :file_browser, %{
+           browser
+           | preview: %{
+               path: path,
+               text: "(empty file)",
+               full_text: "",
+               truncated?: false,
+               language: Marsad.Files.code_language(path),
+               editing: true
+             },
+             error: nil
+         })}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, :file_browser, %{browser | error: "Read failed: #{inspect(reason)}"})}
+    end
+  end
 
   @impl true
   def handle_info(:metrics_tick, socket) do
@@ -1237,6 +1437,14 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
+  def handle_info({:files_search_loaded, ref, sid, results}, socket) do
+    if socket.assigns.files_search_ref == ref && socket.assigns.active_server_id == sid do
+      {:noreply, assign(socket, :files_search_results, results)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_info({:nginx_loaded, ref, sid, status, files, files_error}, socket) do
     if socket.assigns.nginx_load_ref == ref &&
          socket.assigns.nginx != nil && socket.assigns.nginx.server_id == sid do
@@ -1290,8 +1498,6 @@ defmodule MarsadWeb.DesktopLive do
     end)
   end
 
-  # -- File browser helpers -------------------------------------------------
-
   defp ensure_browser(%{assigns: %{file_browser: %{}}} = socket), do: socket
 
   defp ensure_browser(socket) do
@@ -1302,8 +1508,6 @@ defmodule MarsadWeb.DesktopLive do
   end
 
   defp load_browser(socket, server_id, path) do
-    # Listing runs in a Task so the UI can show a shimmer skeleton meanwhile.
-    # Entries `nil` means "loading"; stale results are ignored via the ref.
     ref = make_ref()
     pid = self()
     old_preview = pending_preview(socket, server_id)
@@ -1319,7 +1523,16 @@ defmodule MarsadWeb.DesktopLive do
           end
         end
 
-      send(pid, {:files_loaded, ref, server_id, resolved, Fleet.list_dir(server_id, resolved)})
+      result =
+        try do
+          Fleet.list_dir(server_id, resolved)
+        rescue
+          e -> {:error, e}
+        catch
+          :exit, reason -> {:error, reason}
+        end
+
+      send(pid, {:files_loaded, ref, server_id, resolved, result})
     end)
 
     socket
@@ -1347,8 +1560,6 @@ defmodule MarsadWeb.DesktopLive do
       b -> assign(socket, :file_browser, %{b | error: message})
     end
   end
-
-  # -- Service panels helpers -------------------------------------------------
 
   defp ensure_docker(%{assigns: %{docker: %{}}} = socket), do: socket
 
@@ -1510,8 +1721,6 @@ defmodule MarsadWeb.DesktopLive do
   defp assign_nginx(%{assigns: %{nginx: nil}} = socket, _fun), do: socket
   defp assign_nginx(socket, fun), do: assign(socket, :nginx, fun.(socket.assigns.nginx))
 
-  # -- Monitoring helpers ---------------------------------------------------
-
   defp monitor_open?(socket), do: Enum.any?(socket.assigns.windows, &(&1.app == "monitor"))
 
   defp fetch_metrics_async(socket, nil), do: socket
@@ -1520,7 +1729,19 @@ defmodule MarsadWeb.DesktopLive do
 
   defp fetch_metrics_async(socket, sid) do
     pid = self()
-    Task.start(fn -> send(pid, {:metrics_result, sid, Marsad.Fleet.SysInfo.fetch(sid)}) end)
+
+    Task.start(fn ->
+      result =
+        try do
+          Marsad.Fleet.SysInfo.fetch(sid)
+        rescue
+          e -> {:error, e}
+        catch
+          :exit, reason -> {:error, reason}
+        end
+
+      send(pid, {:metrics_result, sid, result})
+    end)
 
     socket
     |> assign(:metrics_loading, sid)
@@ -1535,7 +1756,16 @@ defmodule MarsadWeb.DesktopLive do
     pid = self()
 
     Task.start(fn ->
-      send(pid, {:top_procs_result, sid, Marsad.Fleet.SysInfo.top_processes(sid)})
+      result =
+        try do
+          Marsad.Fleet.SysInfo.top_processes(sid)
+        rescue
+          e -> {:error, e}
+        catch
+          :exit, reason -> {:error, reason}
+        end
+
+      send(pid, {:top_procs_result, sid, result})
     end)
 
     socket
@@ -1547,179 +1777,13 @@ defmodule MarsadWeb.DesktopLive do
   defp bar_class(pct) when pct >= 70, do: "bg-amber-500"
   defp bar_class(_), do: "bg-emerald-500"
 
-  defp format_size(bytes) when is_integer(bytes) and bytes >= 1_073_741_824,
-    do: "#{Float.round(bytes / 1_073_741_824, 1)}G"
-
-  defp format_size(bytes) when is_integer(bytes) and bytes >= 1_048_576,
-    do: "#{Float.round(bytes / 1_048_576, 1)}M"
-
-  defp format_size(bytes) when is_integer(bytes) and bytes >= 1024,
-    do: "#{Float.round(bytes / 1024, 1)}K"
-
-  defp format_size(bytes) when is_integer(bytes), do: "#{bytes}B"
-  defp format_size(_), do: "—"
-
-  defp format_mtime(mtime) when is_integer(mtime) and mtime > 0 do
-    case DateTime.from_unix(mtime) do
-      {:ok, dt} -> Calendar.strftime(dt, "%Y-%m-%d %H:%M")
-      _ -> "—"
-    end
+  defp cancel_all_uploads(socket, upload) do
+    Enum.reduce(socket.assigns.uploads[upload].entries, socket, fn entry, acc ->
+      cancel_upload(acc, upload, entry.ref)
+    end)
   end
 
-  # OTP :ssh_sftp returns file times as {{Y,M,D},{h,m,s}} tuples.
-  defp format_mtime({{y, mo, d}, {h, mi, _s}}) do
-    case NaiveDateTime.new(y, mo, d, h, mi, 0) do
-      {:ok, ndt} -> Calendar.strftime(ndt, "%Y-%m-%d %H:%M")
-      _ -> "—"
-    end
-  end
-
-  defp format_mtime(_), do: "—"
-
-  defp code_language(path) when is_binary(path) do
-    case String.downcase(Path.extname(path)) do
-      ".sh" ->
-        "shell"
-
-      ".bash" ->
-        "shell"
-
-      ".zsh" ->
-        "shell"
-
-      ".service" ->
-        "properties"
-
-      ".timer" ->
-        "properties"
-
-      ".socket" ->
-        "properties"
-
-      ".mount" ->
-        "properties"
-
-      ".target" ->
-        "properties"
-
-      ".conf" ->
-        "nginx"
-
-      ".config" ->
-        "nginx"
-
-      ".yml" ->
-        "yaml"
-
-      ".yaml" ->
-        "yaml"
-
-      ".json" ->
-        "javascript"
-
-      ".js" ->
-        "javascript"
-
-      ".ts" ->
-        "javascript"
-
-      ".jsx" ->
-        "javascript"
-
-      ".tsx" ->
-        "javascript"
-
-      ".css" ->
-        "css"
-
-      ".scss" ->
-        "css"
-
-      ".less" ->
-        "css"
-
-      ".html" ->
-        "htmlmixed"
-
-      ".htm" ->
-        "htmlmixed"
-
-      ".xml" ->
-        "xml"
-
-      ".md" ->
-        "markdown"
-
-      ".markdown" ->
-        "markdown"
-
-      ".py" ->
-        "python"
-
-      ".rb" ->
-        "ruby"
-
-      ".go" ->
-        "go"
-
-      ".php" ->
-        "php"
-
-      ".rs" ->
-        "rust"
-
-      ".ex" ->
-        "erlang"
-
-      ".exs" ->
-        "erlang"
-
-      ".toml" ->
-        "toml"
-
-      ".ini" ->
-        "properties"
-
-      ".env" ->
-        "properties"
-
-      ".dockerfile" ->
-        "dockerfile"
-
-      ".sql" ->
-        "sql"
-
-      ".gradle" ->
-        "groovy"
-
-      ".kt" ->
-        "text/x-kotlin"
-
-      ".kts" ->
-        "text/x-kotlin"
-
-      ".java" ->
-        "text/x-java"
-
-      ".cs" ->
-        "text/x-csharp"
-
-      ".cr" ->
-        "crystal"
-
-      ".crystal" ->
-        "crystal"
-
-      _ ->
-        cond do
-          String.contains?(path, "nginx") -> "nginx"
-          String.ends_with?(path, ".service") -> "properties"
-          true -> "text/plain"
-        end
-    end
-  end
-
-  defp code_language(_), do: "text/plain"
+  defp code_language(path), do: Marsad.Files.code_language(path)
 
   defp terminal_window_id(%{assigns: %{active_server_id: nil}}), do: "terminal"
   defp terminal_window_id(%{assigns: %{active_server_id: id}}), do: "terminal-#{id}"
@@ -1890,8 +1954,6 @@ defmodule MarsadWeb.DesktopLive do
     |> append_transcript(wid, chunk)
     |> push_event("terminal_output", %{data: chunk, window_id: wid})
   end
-
-  # -- Template -----------------------------------------------------------
 
   @impl true
   def render(assigns) do
@@ -2129,9 +2191,11 @@ defmodule MarsadWeb.DesktopLive do
                       appearance={@appearance}
                     />
                   <% w.app == "files" -> %>
-                    <.files_app
+                    <FilesComponent.files_app
                       servers={@servers}
                       browser={@file_browser}
+                      files_filter={@files_filter}
+                      files_search_results={@files_search_results}
                       mkdir_form={@mkdir_form}
                       uploads={@uploads}
                       appearance={@appearance}
@@ -2359,257 +2423,6 @@ defmodule MarsadWeb.DesktopLive do
         <.icon name="hero-information-circle" class="size-4 shrink-0" />
         More sections (SSH defaults, notifications) will live here as the OS grows.
       </p>
-    </div>
-    """
-  end
-
-  attr :servers, :list, required: true
-  attr :browser, :any, required: true
-  attr :mkdir_form, :any, required: true
-  attr :uploads, :any, required: true
-  attr :appearance, :map, required: true
-
-  defp files_app(assigns) do
-    ~H"""
-    <div id="files-browser" class="marsad-scroll flex h-full min-h-0 flex-col overflow-y-auto">
-      <div class="flex flex-wrap items-center gap-2 border-b border-base-content/10 px-4 py-2.5">
-        <span class="acc-soft flex size-7 items-center justify-center rounded-lg">
-          <.icon name="hero-folder" class="size-4" />
-        </span>
-        <form id="files-server-form" phx-change="files-server" class="flex items-center gap-1.5">
-          <select
-            id="files-server-select"
-            name="server_id"
-            class="select select-sm select-bordered max-w-44"
-            aria-label="Browse server"
-          >
-            <option value="">Select server…</option>
-            <option
-              :for={s <- @servers}
-              value={s.id}
-              selected={@browser && @browser.server_id == s.id}
-            >
-              {s.name}
-            </option>
-          </select>
-        </form>
-        <div :if={@browser} class="flex items-center gap-1">
-          <button
-            id="files-up"
-            phx-click="files-up"
-            title="Parent directory"
-            class="btn btn-xs btn-ghost border border-base-content/15 phx-click-loading:opacity-60"
-          >
-            <.icon name="hero-arrow-up" class="marsad-spin-target size-3.5" />
-          </button>
-          <button
-            id="files-refresh"
-            phx-click="files-refresh"
-            title="Refresh"
-            class="btn btn-xs btn-ghost border border-base-content/15 phx-click-loading:opacity-60"
-          >
-            <.icon name="hero-arrow-path" class="marsad-spin-target size-3.5" />
-          </button>
-        </div>
-        <span :if={@browser} class="ml-auto font-mono text-[11px] text-base-content/50">
-          {if @browser.entries, do: "#{length(@browser.entries)} items", else: "loading…"}
-        </span>
-      </div>
-
-      <div
-        :if={!@browser}
-        id="files-empty"
-        class="flex flex-1 items-center justify-center p-8 text-center"
-      >
-        <div>
-          <.icon name="hero-folder-open" class="mx-auto size-10 text-base-content/30" />
-          <p class="mt-2 font-semibold">No server selected</p>
-          <p class="text-sm text-base-content/60">
-            Pick a server above to browse its files over SFTP.
-          </p>
-        </div>
-      </div>
-
-      <div :if={@browser} class="flex min-h-0 flex-1 flex-col">
-        <nav
-          aria-label="Path"
-          class="flex items-center gap-1 overflow-x-auto border-b border-base-content/10 px-4 py-2 font-mono text-xs"
-        >
-          <button
-            phx-click="files-cd"
-            phx-value-path="/"
-            class="rounded px-1.5 py-0.5 hover:bg-base-content/10"
-            title="Root"
-          >/</button>
-          <span
-            :for={{name, full} <- Fleet.remote_segments(@browser.path)}
-            class="flex shrink-0 items-center gap-1"
-          >
-            <span class="text-base-content/30">/</span>
-            <button
-              phx-click="files-cd"
-              phx-value-path={full}
-              class="rounded px-1.5 py-0.5 hover:bg-base-content/10"
-            >{name}</button>
-          </span>
-        </nav>
-
-        <p
-          :if={@browser.error}
-          id="files-error"
-          role="alert"
-          class="mx-4 mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
-        >
-          {@browser.error}
-        </p>
-
-        <div
-          :if={@browser.entries == nil}
-          id="files-skeleton"
-          class="min-h-0 flex-1 space-y-0 overflow-hidden p-2"
-          aria-label="Loading files"
-        >
-          <div :for={_ <- 1..8} class="flex items-center gap-3 px-2 py-2">
-            <span class="marsad-shimmer size-4 shrink-0 rounded" />
-            <span class="marsad-shimmer h-3.5 rounded" style="width: 32%" />
-            <span class="marsad-shimmer ml-auto h-3 w-12 rounded" />
-          </div>
-        </div>
-
-        <div :if={@browser.entries != nil} id="files-list" class="min-h-0 flex-1 overflow-y-auto">
-          <div
-            :for={e <- @browser.entries}
-            id={"file-#{e.name}"}
-            class="group flex items-center gap-3 border-b border-base-content/[0.06] px-4 py-1.5 text-sm transition hover:bg-base-content/[0.05]"
-          >
-            <%= if e.type == :dir do %>
-              <button
-                phx-click="files-open"
-                phx-value-name={e.name}
-                phx-value-type="dir"
-                class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
-              >
-                <.icon name="hero-folder" class="size-4 shrink-0 acc-text" />
-                <span class="truncate font-medium">{e.name}</span>
-              </button>
-            <% else %>
-              <button
-                phx-click="files-open"
-                phx-value-name={e.name}
-                phx-value-type="file"
-                class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
-              >
-                <.icon name="hero-document" class="size-4 shrink-0 text-base-content/40" />
-                <span class="truncate">{e.name}</span>
-              </button>
-            <% end %>
-            <span class="hidden shrink-0 font-mono text-[11px] text-base-content/40 sm:block">{e.perms}</span>
-            <span class="hidden w-16 shrink-0 text-right font-mono text-[11px] text-base-content/50 md:block">{format_size(
-              e.size
-            )}</span>
-            <span class="hidden w-28 shrink-0 text-right font-mono text-[11px] text-base-content/40 lg:block">{format_mtime(
-              e.mtime
-            )}</span>
-            <button
-              phx-click="files-delete"
-              phx-value-name={e.name}
-              phx-value-type={to_string(e.type)}
-              data-confirm={"Delete #{e.name}?"}
-              title={"Delete #{e.name}"}
-              class="shrink-0 rounded p-1 text-base-content/30 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-500 focus:opacity-100"
-            >
-              <.icon name="hero-trash" class="size-3.5" />
-            </button>
-          </div>
-          <p
-            :if={@browser.entries == [] and !@browser.error}
-            class="p-6 text-center text-sm text-base-content/50"
-          >
-            Empty directory.
-          </p>
-        </div>
-
-        <div :if={@browser.preview} class="border-t border-base-content/10">
-          <div class="flex items-center gap-2 bg-base-content/[0.04] px-4 py-1.5 font-mono text-[11px]">
-            <span class="truncate font-mono text-xs font-medium text-base-content/80">{@browser.preview.path}</span>
-            <span
-              :if={@browser.preview.language not in [nil, "text/plain"]}
-              class="rounded bg-base-content/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wider"
-            >{@browser.preview.language}</span>
-            <span
-              :if={@browser.preview.truncated?}
-              class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-700 dark:text-amber-300"
-            >truncated</span>
-            <span class="ml-auto flex items-center gap-1">
-              <span class="hidden text-[10px] text-base-content/40 sm:inline">Ctrl+S to save</span>
-              <button
-                data-save-path={@browser.preview.path}
-                class="btn btn-xs acc-bg border-0 gap-1"
-                title="Save (Ctrl+S)"
-              >
-                <.icon name="hero-check" class="size-3.5" /> Save
-              </button>
-              <button
-                id="files-preview-close"
-                phx-click="files-close-preview"
-                class="rounded p-0.5 hover:bg-base-content/10"
-                aria-label="Close preview"
-              >
-                <.icon name="hero-x-mark" class="size-3.5" />
-              </button>
-            </span>
-          </div>
-          <div class="marsad-code-editor-wrap">
-            <textarea
-              id={"code-files-" <> Base.url_encode64(@browser.preview.path, padding: false)}
-              phx-hook="CodeEditor"
-              phx-update="ignore"
-              data-path={@browser.preview.path}
-              data-language={@browser.preview.language || "text/plain"}
-              data-theme={@appearance.mode}
-              data-readonly="false"
-              class="hidden"
-            ><%= @browser.preview.full_text || @browser.preview.text %></textarea>
-          </div>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-2 border-t border-base-content/10 px-4 py-2.5">
-          <.form
-            for={@mkdir_form}
-            id="mkdir-form"
-            phx-submit="files-mkdir"
-            class="flex items-center gap-1.5"
-          >
-            <.input
-              field={@mkdir_form[:dirname]}
-              type="text"
-              placeholder="New folder…"
-              aria-label="New folder name"
-              class="input-xs"
-            />
-            <button type="submit" class="btn btn-xs border-base-content/15">Create</button>
-          </.form>
-          <form
-            id="upload-form"
-            phx-submit="files-upload"
-            phx-change="validate-upload"
-            class="ml-auto flex items-center gap-1.5"
-          >
-            <.live_file_input
-              upload={@uploads.remote_files}
-              class="file-input file-input-xs file-input-bordered max-w-44"
-              aria-label="Files to upload"
-            />
-            <button type="submit" class="btn btn-xs acc-bg border-0">Upload</button>
-          </form>
-        </div>
-        <div
-          :for={entry <- @uploads.remote_files.entries}
-          class="px-4 pb-1 text-[11px] text-base-content/60"
-        >
-          {entry.client_name} — {entry.progress}%
-        </div>
-      </div>
     </div>
     """
   end

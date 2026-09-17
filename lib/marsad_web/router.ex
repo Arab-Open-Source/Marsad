@@ -18,6 +18,7 @@ defmodule MarsadWeb.Router do
     pipe_through :browser
 
     live "/", DesktopLive, :index
+    get "/files/download", FileDownloadController, :download
   end
 
   # Other scopes may use custom stacks.
