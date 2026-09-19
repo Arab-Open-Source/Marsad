@@ -41,7 +41,9 @@ defmodule MarsadWeb.Desktop.PanelsTest do
         files: nil,
         files_error: false,
         files_filter: "",
-        file_preview: nil
+        file_preview: nil,
+        certs: nil,
+        certs_ref: nil
       },
       overrides
     )
@@ -152,5 +154,58 @@ defmodule MarsadWeb.Desktop.PanelsTest do
       )
 
     assert html =~ "nginx-panel"
+  end
+
+  test "nginx certs section covers all states" do
+    render = fn state ->
+      render_component(&NginxPanel.panel/1, servers: servers(), state: nginx_state(state))
+    end
+
+    assert render.(%{server_id: 1}) =~ "Check certificates"
+
+    assert render.(%{server_id: 1, certs: :loading}) =~ "Checking certificates"
+
+    assert render.(%{server_id: 1, certs: {:error, :boom}}) =~ "Check failed"
+
+    assert render.(%{server_id: 1, certs: {:ok, []}}) =~ "No HTTPS vhosts"
+
+    now = DateTime.utc_now()
+
+    certs = [
+      %{
+        domain: "ok.example.com",
+        port: 443,
+        wildcard?: false,
+        expires_at: DateTime.add(now, 90 * 86_400, :second),
+        days_left: 90,
+        status: :ok,
+        note: "expires in 90d"
+      },
+      %{
+        domain: "soon.example.com",
+        port: 443,
+        wildcard?: false,
+        expires_at: DateTime.add(now, 5 * 86_400, :second),
+        days_left: 5,
+        status: :critical,
+        note: "expires in 5d"
+      },
+      %{
+        domain: "wild.example.com",
+        port: 8443,
+        wildcard?: true,
+        expires_at: nil,
+        days_left: nil,
+        status: :unknown,
+        note: "check failed"
+      }
+    ]
+
+    html = render.(%{server_id: 1, certs: {:ok, certs}})
+    assert html =~ "ok.example.com"
+    assert html =~ "1 critical"
+    assert html =~ "expires in 5d"
+    assert html =~ "(wildcard)"
+    assert html =~ "check failed"
   end
 end

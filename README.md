@@ -85,6 +85,7 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 
 ### Nginx Web Server Management
 - Service status with config test result
+- SSL certificate expiry monitoring: parses every HTTPS vhost, checks live certs via `openssl`, and warns (≤ 30 days) or alarms (≤ 14 days / expired) with per-domain pills
 - Reload and restart nginx
 - Full configuration dump viewer
 - Config file browser under `/etc/nginx` with path confinement

@@ -138,6 +138,8 @@ defmodule MarsadWeb.Desktop.NginxPanel do
               </div>
           <% end %>
 
+          <.certs_section state={@state} />
+
           <div class="rounded-2xl border border-base-content/10 bg-base-content/[0.03] p-4">
             <div class="flex items-center gap-2">
               <p class="text-xs font-semibold uppercase tracking-wider text-base-content/50">
@@ -334,6 +336,132 @@ defmodule MarsadWeb.Desktop.NginxPanel do
 
   defp format_kb(bytes) when is_integer(bytes), do: "#{bytes}B"
   defp format_kb(_), do: "—"
+
+  # -- certificates section ---------------------------------------------------------
+
+  attr :state, :map, required: true
+
+  defp certs_section(assigns) do
+    ~H"""
+    <div id="nginx-certs" class="rounded-2xl border border-base-content/10 bg-base-content/[0.03] p-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <p class="text-xs font-semibold uppercase tracking-wider text-base-content/50">
+          Certificates
+        </p>
+        <span :if={match?({:ok, _}, @state.certs)} class="flex items-center gap-1.5">
+          <.cert_summary_pill summary={Marsad.Fleet.Services.cert_summary(elem(@state.certs, 1))} />
+        </span>
+        <button
+          id="nginx-certs-check"
+          phx-click="nginx-check-certs"
+          class="btn btn-xs ml-auto border-base-content/15 phx-click-loading:opacity-60"
+        >
+          <.icon name="hero-shield-check" class="marsad-spin-target size-3.5" />
+          {if @state.certs, do: "Recheck", else: "Check certificates"}
+        </button>
+      </div>
+      <%= case @state.certs do %>
+        <% nil -> %>
+          <p class="mt-2 text-xs leading-relaxed text-base-content/50">
+            Checks every HTTPS vhost's live certificate expiry (warn ≤ 30 days, critical ≤ 14 days).
+          </p>
+        <% :loading -> %>
+          <div class="mt-2 space-y-1.5" aria-label="Checking certificates">
+            <div :for={_ <- 1..3} class="flex items-center gap-3">
+              <span class="marsad-shimmer size-4 shrink-0 rounded-full" />
+              <span class="marsad-shimmer h-3.5 rounded" style="width: 45%" />
+              <span class="marsad-shimmer ml-auto h-3 w-20 rounded" />
+            </div>
+          </div>
+        <% {:error, reason} -> %>
+          <p
+            role="alert"
+            class="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 font-mono text-xs"
+          >
+            Check failed: {inspect(reason)}
+          </p>
+        <% {:ok, []} -> %>
+          <p class="mt-2 text-xs text-base-content/60">
+            No HTTPS vhosts found in this nginx config — nothing to check.
+          </p>
+        <% {:ok, certs} -> %>
+          <ul class="mt-2 space-y-1.5">
+            <li
+              :for={c <- certs}
+              class="flex items-center gap-2.5 rounded-xl border border-base-content/10 bg-base-100 px-3 py-2"
+            >
+              <span class={["size-2 shrink-0 rounded-full", cert_dot(c.status)]} title={c.note} />
+              <div class="min-w-0 flex-1">
+                <p class="truncate font-mono text-xs font-bold">
+                  {c.domain}{c.wildcard? && " (wildcard)"}
+                </p>
+                <p class="truncate font-mono text-[11px] text-base-content/50">
+                  :{c.port} · {cert_expiry(c)}
+                </p>
+              </div>
+              <span class={[
+                "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
+                cert_tone(c.status)
+              ]}>
+                {cert_label(c)}
+              </span>
+            </li>
+          </ul>
+      <% end %>
+    </div>
+    """
+  end
+
+  attr :summary, :map, required: true
+
+  defp cert_summary_pill(assigns) do
+    ~H"""
+    <span
+      :if={@summary.critical > 0}
+      class="rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] font-bold text-red-600 dark:text-red-300"
+    >
+      {@summary.critical} critical
+    </span>
+    <span
+      :if={@summary.critical == 0 and @summary.warning > 0}
+      class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:text-amber-300"
+    >
+      expiring soon
+    </span>
+    <span
+      :if={@summary.critical == 0 and @summary.warning == 0}
+      class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-300"
+    >
+      all valid
+    </span>
+    """
+  end
+
+  defp cert_dot(:critical), do: "bg-red-500"
+  defp cert_dot(:warning), do: "bg-amber-500"
+  defp cert_dot(:unknown), do: "bg-base-content/30"
+  defp cert_dot(_), do: "bg-emerald-500"
+
+  defp cert_tone(:critical),
+    do: "bg-red-500/15 text-red-600 ring-1 ring-red-500/30 dark:text-red-300"
+
+  defp cert_tone(:warning),
+    do: "bg-amber-500/15 text-amber-700 ring-1 ring-amber-500/30 dark:text-amber-300"
+
+  defp cert_tone(:unknown),
+    do: "bg-base-content/10 text-base-content/60 ring-1 ring-base-content/15"
+
+  defp cert_tone(_),
+    do: "bg-emerald-500/15 text-emerald-700 ring-1 ring-emerald-500/30 dark:text-emerald-300"
+
+  defp cert_label(%{status: :critical, note: note}), do: note
+  defp cert_label(%{status: :warning, note: note}), do: note
+  defp cert_label(%{status: :unknown}), do: "check failed"
+  defp cert_label(%{days_left: days}), do: "#{days}d left"
+
+  defp cert_expiry(%{expires_at: nil}), do: "expiry unknown"
+  defp cert_expiry(%{expires_at: %DateTime{} = dt}), do: Calendar.strftime(dt, "%Y-%m-%d")
+  defp cert_expiry(_), do: "expiry unknown"
 
   defp filtered_files(nil, _), do: nil
   defp filtered_files(files, filter) when filter in [nil, ""], do: files

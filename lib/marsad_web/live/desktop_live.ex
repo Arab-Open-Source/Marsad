@@ -1266,6 +1266,24 @@ defmodule MarsadWeb.DesktopLive do
     {:noreply, socket}
   end
 
+  def handle_event("nginx-check-certs", _params, socket) do
+    case socket.assigns.nginx do
+      %{server_id: sid} ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:nginx_certs_done, ref, sid, Services.cert_check(sid)})
+        end)
+
+        {:noreply,
+         assign(socket, :nginx, %{socket.assigns.nginx | certs: :loading, certs_ref: ref})}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("nginx-config", _params, socket) do
     socket =
       case socket.assigns.nginx do
@@ -1800,6 +1818,16 @@ defmodule MarsadWeb.DesktopLive do
        })}
     else
       {:noreply, socket}
+    end
+  end
+
+  def handle_info({:nginx_certs_done, ref, sid, result}, socket) do
+    case socket.assigns.nginx do
+      %{server_id: ^sid, certs_ref: ^ref} = n ->
+        {:noreply, assign(socket, :nginx, %{n | certs: result, certs_ref: nil})}
+
+      _ ->
+        {:noreply, socket}
     end
   end
 
@@ -2463,7 +2491,9 @@ defmodule MarsadWeb.DesktopLive do
       files: nil,
       files_error: false,
       files_filter: "",
-      file_preview: nil
+      file_preview: nil,
+      certs: nil,
+      certs_ref: nil
     })
     |> assign(:nginx_load_ref, ref)
   end
@@ -2500,7 +2530,9 @@ defmodule MarsadWeb.DesktopLive do
       files: nil,
       files_error: false,
       files_filter: filter || "",
-      file_preview: preview
+      file_preview: preview,
+      certs: nil,
+      certs_ref: nil
     })
     |> assign(:nginx_load_ref, ref)
   end

@@ -674,6 +674,294 @@ defmodule Marsad.Fleet.Services do
     end)
   end
 
+  # -- SSL certificates ---------------------------------------------------------------
+
+  @cert_warn_days 30
+  @cert_critical_days 14
+
+  @type cert_check :: %{
+          domain: binary(),
+          port: pos_integer(),
+          wildcard?: boolean(),
+          expires_at: DateTime.t() | nil,
+          days_left: integer() | nil,
+          status: :ok | :warning | :critical | :unknown,
+          note: binary()
+        }
+
+  @doc """
+  Checks TLS certificate expiry for every HTTPS vhost (2 SSH calls:
+  config dump, then one `openssl` loop). Never raises.
+  """
+  @spec cert_check(pos_integer()) :: {:ok, [cert_check()]} | {:error, term()}
+  def cert_check(server_id) do
+    with {:ok, dump} <- nginx_config(server_id),
+         [_ | _] = vhosts <- parse_nginx_vhosts(dump),
+         [_ | _] = targets <- vhost_targets(vhosts),
+         {:ok, %{stdout: out}} <- Fleet.exec(server_id, cert_check_command(targets)) do
+      {:ok, parse_cert_results(out, targets)}
+    else
+      [] -> {:ok, []}
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:error, :check_failed}
+  catch
+    _, _ -> {:error, :check_failed}
+  end
+
+  @doc "Warning/critical day thresholds for certificate expiry."
+  def cert_thresholds, do: %{warning: @cert_warn_days, critical: @cert_critical_days}
+
+  @doc """
+  Extracts HTTPS vhosts (`%{domains: [...], port: n}`) from an `nginx -T`
+  dump. Pure — unit tested.
+  """
+  @spec parse_nginx_vhosts(binary()) :: [%{domains: [binary()], port: pos_integer()}]
+  def parse_nginx_vhosts(dump) when is_binary(dump) do
+    dump
+    |> String.split("\n")
+    |> Enum.reduce({[], []}, &vhost_line/2)
+    |> then(fn {done, stack} -> Enum.reverse(done) ++ flush_stack(stack) end)
+    |> Enum.filter(&(&1.domains != []))
+    |> Enum.map(fn v -> %{domains: Enum.uniq(v.domains), port: v.port} end)
+  end
+
+  def parse_nginx_vhosts(_), do: []
+
+  # Stack frames: {:server, vhost} | :other. Depth is implicit in the stack.
+  defp vhost_line(line, {done, stack}) do
+    code = line |> String.split("#", parts: 2) |> hd() |> String.trim()
+
+    cond do
+      code == "" ->
+        {done, stack}
+
+      # `server {` opens a vhost frame (only at http level, but tracking
+      # depth via the stack makes nesting safe anywhere).
+      Regex.match?(~r/\Aserver\s*\{\s*\z/, code) ->
+        {done, [{:server, %{domains: [], port: 80, ssl?: false}} | stack]}
+
+      String.ends_with?(code, "{") ->
+        {done, [:other | stack]}
+
+      code == "}" ->
+        case stack do
+          [{:server, v} | rest] -> {maybe_ssl_vhost(done, v), rest}
+          [_ | rest] -> {done, rest}
+          [] -> {done, []}
+        end
+
+      true ->
+        {done, vhost_directive(stack, code)}
+    end
+  end
+
+  defp flush_stack(stack) do
+    stack
+    |> Enum.flat_map(fn
+      {:server, v} -> [v]
+      _ -> []
+    end)
+  end
+
+  defp maybe_ssl_vhost(done, %{ssl?: true} = v), do: [Map.delete(v, :ssl?) | done]
+  defp maybe_ssl_vhost(done, _), do: done
+
+  # Directives inside nested blocks (location/if) must not leak into the vhost.
+  defp vhost_directive([:other | _] = stack, _code), do: stack
+
+  defp vhost_directive([{:server, v} | rest], code) do
+    [{:server, apply_server_directive(v, code)} | rest]
+  end
+
+  defp vhost_directive(stack, _code), do: stack
+
+  defp apply_server_directive(v, code) do
+    cond do
+      String.starts_with?(code, "server_name ") ->
+        names =
+          code
+          |> String.trim_trailing(";")
+          |> String.split(~r/\s+/, trim: true)
+          |> Enum.drop(1)
+          |> Enum.map(&unquote_name/1)
+          |> Enum.reject(&(&1 in ["", "_"]))
+
+        %{v | domains: v.domains ++ names}
+
+      String.starts_with?(code, "listen ") ->
+        %{v | port: listen_port(code, v.port), ssl?: v.ssl? or listen_ssl?(code)}
+
+      String.starts_with?(code, "ssl_certificate ") ->
+        %{v | ssl?: true}
+
+      true ->
+        v
+    end
+  end
+
+  defp unquote_name(name) do
+    if String.length(name) >= 2 and String.starts_with?(name, ["\"", "'"]) and
+         String.ends_with?(name, ["\"", "'"]) do
+      String.slice(name, 1..-2//1)
+    else
+      name
+    end
+  end
+
+  defp listen_port(code, default) do
+    # Last `host:port` or bare port wins (`listen [::]:8443 ssl`).
+    ports =
+      Regex.scan(~r/(\d+)(?=\s|;|$)/, code)
+      |> Enum.map(fn [_, p] -> String.to_integer(p) end)
+      |> Enum.reject(&(&1 > 65_535))
+
+    List.last(ports) || default
+  end
+
+  defp listen_ssl?(code), do: Regex.match?(~r/(^|\s)ssl(\s|;|$)/, code)
+
+  @doc "Flattens vhosts to unique `{check_domain, port, wildcard?}` targets. Pure."
+  @spec vhost_targets([map()]) :: [{binary(), pos_integer(), boolean()}]
+  def vhost_targets(vhosts) do
+    vhosts
+    |> Enum.flat_map(fn v ->
+      Enum.map(v.domains, fn d ->
+        if String.starts_with?(d, "*.") do
+          {"www." <> String.slice(d, 2..-1//1), v.port, true}
+        else
+          {d, v.port, false}
+        end
+      end)
+    end)
+    |> Enum.uniq()
+  end
+
+  @doc "Builds the single remote `openssl` loop for the targets. Pure — unit tested."
+  @spec cert_check_command([{binary(), pos_integer(), boolean()}]) :: binary()
+  def cert_check_command(targets) do
+    checks =
+      targets
+      |> Enum.map(fn {domain, port, _wild} ->
+        "chk #{Marsad.Helpers.Text.shell_quote(domain)} #{port}"
+      end)
+      |> Enum.join("\n")
+
+    """
+    command -v openssl >/dev/null 2>&1 || { echo "__MARSAD_NO_OPENSSL__"; exit 0; }
+    if command -v timeout >/dev/null 2>&1; then TO="timeout 10"; else TO=""; fi
+    chk() { d="$1"; p="$2"; e=$(echo | $TO openssl s_client -connect "127.0.0.1:$p" -servername "$d" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null); echo "$d|$p|${e#notAfter=}"; }
+    #{checks}
+    """
+  end
+
+  @doc "Parses loop output lines into checks (with thresholds applied). Pure."
+  @spec parse_cert_results(binary(), [{binary(), pos_integer(), boolean()}]) :: [cert_check()]
+  def parse_cert_results(out, targets) do
+    if String.contains?(out, "__MARSAD_NO_OPENSSL__") do
+      []
+    else
+      by_key =
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&parse_cert_line/1)
+        |> Map.new(fn {domain, port, date} -> {{domain, port}, date} end)
+
+      Enum.map(targets, fn {domain, port, wild} ->
+        build_cert_check(domain, port, wild, Map.get(by_key, {domain, port}))
+      end)
+    end
+  end
+
+  defp parse_cert_line(line) do
+    case String.split(line, "|", parts: 3) do
+      [domain, port_s, date] ->
+        with {port, ""} <- Integer.parse(String.trim(port_s)),
+             true <- domain != "" do
+          [{String.trim(domain), port, String.trim(date)}]
+        else
+          _ -> []
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp build_cert_check(domain, port, wild, date_str) do
+    base = %{domain: domain, port: port, wildcard?: wild, expires_at: nil, days_left: nil}
+
+    case parse_cert_date(date_str || "") do
+      {:ok, expires} ->
+        days = DateTime.diff(expires, DateTime.utc_now(), :second) |> div(86_400)
+        {status, note} = cert_status(days)
+
+        Map.merge(base, %{expires_at: expires, days_left: days, status: status, note: note})
+
+      :error ->
+        Map.merge(base, %{status: :unknown, note: "check failed"})
+    end
+  end
+
+  defp cert_status(days) when days < 0, do: {:critical, "expired"}
+  defp cert_status(days) when days <= @cert_critical_days, do: {:critical, "expires in #{days}d"}
+  defp cert_status(days) when days <= @cert_warn_days, do: {:warning, "expires in #{days}d"}
+  defp cert_status(days), do: {:ok, "expires in #{days}d"}
+
+  @months %{
+    "Jan" => 1,
+    "Feb" => 2,
+    "Mar" => 3,
+    "Apr" => 4,
+    "May" => 5,
+    "Jun" => 6,
+    "Jul" => 7,
+    "Aug" => 8,
+    "Sep" => 9,
+    "Oct" => 10,
+    "Nov" => 11,
+    "Dec" => 12
+  }
+
+  @doc "Parses `openssl x509 -enddate` output (`Nov  3 12:00:00 2026 GMT`). Pure."
+  @spec parse_cert_date(binary()) :: {:ok, DateTime.t()} | :error
+  def parse_cert_date(date) when is_binary(date) do
+    case Regex.run(~r/\A(\w{3})\s+(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})/, String.trim(date)) do
+      [_, mon, day, hh, mm, ss, year] ->
+        with month when not is_nil(month) <- Map.get(@months, mon),
+             {:ok, d} <- Date.new(String.to_integer(year), month, String.to_integer(day)),
+             {:ok, t} <-
+               Time.new(String.to_integer(hh), String.to_integer(mm), String.to_integer(ss)),
+             {:ok, dt} <- DateTime.new(d, t, "Etc/UTC") do
+          {:ok, dt}
+        else
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  def parse_cert_date(_), do: :error
+
+  @doc "Summarizes checks for header pills. Pure."
+  @spec cert_summary([cert_check()]) :: %{
+          total: integer(),
+          critical: integer(),
+          warning: integer(),
+          unknown: integer()
+        }
+  def cert_summary(certs) do
+    %{
+      total: length(certs),
+      critical: Enum.count(certs, &(&1.status == :critical)),
+      warning: Enum.count(certs, &(&1.status == :warning)),
+      unknown: Enum.count(certs, &(&1.status == :unknown))
+    }
+  end
+
   # -- Shared -----------------------------------------------------------------
 
   @doc "Strict allow-list for remote names interpolated into shell commands."
