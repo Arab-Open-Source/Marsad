@@ -48,6 +48,7 @@ defmodule MarsadWeb.Router do
     end
 
     get "/files/download", FileDownloadController, :download
+    get "/docker/logs/download", DockerLogsController, :download
   end
 
   # Other scopes may use custom stacks.

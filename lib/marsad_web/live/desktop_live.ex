@@ -872,22 +872,23 @@ defmodule MarsadWeb.DesktopLive do
   end
 
   def handle_event("docker-refresh", _params, socket) do
-    {:noreply, reload_docker(socket)}
+    {:noreply, reload_docker_list(socket)}
   end
 
-  def handle_event("docker-action", %{"action" => action, "name" => name}, socket) do
-    socket =
-      case socket.assigns.docker do
-        %{server_id: sid} ->
-          case Services.docker_action(sid, action, name) do
-            {:ok, _} ->
-              Services.audit(sid, "docker_#{action}", name, "ok")
-              socket |> put_flash(:info, "Container #{action}ed.") |> reload_docker()
+  def handle_event("docker-tab", %{"tab" => tab}, socket)
+      when tab in ~w(containers images stacks activity) do
+    socket = assign_docker(socket, fn d -> %{d | tab: tab} end)
 
-            {:error, reason} ->
-              Services.audit(sid, "docker_#{action}", name, "failed: #{inspect(reason)}")
-              put_flash(socket, :error, "Docker #{action} failed: #{inspect(reason)}")
-          end
+    socket =
+      case {tab, socket.assigns.docker} do
+        {"images", %{server_id: sid, images: nil}} ->
+          fetch_docker_images(socket, sid)
+
+        {"stacks", %{server_id: sid, stacks: nil}} ->
+          fetch_docker_stacks(socket, sid)
+
+        {"activity", %{server_id: sid}} ->
+          assign_docker(socket, fn d -> %{d | audit: Services.list_audit(sid)} end)
 
         _ ->
           socket
@@ -896,56 +897,123 @@ defmodule MarsadWeb.DesktopLive do
     {:noreply, socket}
   end
 
-  def handle_event("docker-logs", %{"name" => name}, socket) do
-    socket =
-      case socket.assigns.docker do
-        %{server_id: sid} = d ->
-          case Services.docker_logs(sid, name) do
-            {:ok, text} -> assign(socket, :docker, %{d | logs: %{name: name, text: text}})
-            {:error, reason} -> put_flash(socket, :error, "Logs failed: #{inspect(reason)}")
-          end
+  def handle_event("docker-tab", _params, socket), do: {:noreply, socket}
 
-        _ ->
-          socket
-      end
-
-    {:noreply, socket}
+  def handle_event("docker-filter", params, socket) do
+    {:noreply,
+     assign_docker(socket, fn d ->
+       %{
+         d
+         | filter: Map.get(params, "filter", d.filter),
+           status: valid_docker_status(Map.get(params, "status", d.status)),
+           sort: valid_docker_sort(Map.get(params, "sort", d.sort))
+       }
+     end)}
   end
 
-  def handle_event("docker-close-logs", _params, socket) do
-    {:noreply, assign_docker(socket, fn d -> %{d | logs: nil} end)}
+  def handle_event("docker-clear-filter", _params, socket) do
+    {:noreply, assign_docker(socket, fn d -> %{d | filter: ""} end)}
   end
 
-  def handle_event("docker-stats", _params, socket) do
+  def handle_event("docker-action", %{"action" => action, "name" => name}, socket)
+      when action in ~w(start stop restart remove) do
     case socket.assigns.docker do
-      %{server_id: sid} = d ->
-        case Services.docker_stats(sid) do
-          {:ok, stats} ->
-            {:noreply, assign(socket, :docker, %{d | stats: stats})}
+      %{server_id: sid, busy: nil} ->
+        ref = make_ref()
+        lv = self()
 
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, "Stats failed: #{inspect(reason)}")}
-        end
+        Task.start(fn ->
+          send(
+            lv,
+            {:docker_action_done, ref, sid, action, name,
+             Services.docker_action(sid, action, name)}
+          )
+        end)
+
+        {:noreply,
+         assign(socket, :docker, %{
+           socket.assigns.docker
+           | busy: %{action: action, name: name},
+             action_ref: ref
+         })}
+
+      %{busy: %{} = _busy} ->
+        {:noreply, put_flash(socket, :info, "Another container action is still running…")}
 
       _ ->
         {:noreply, socket}
     end
   end
 
-  def handle_event("docker-inspect", %{"name" => name}, socket) do
+  # Forged/unknown actions never crash the LiveView.
+  def handle_event("docker-action", %{"action" => action}, socket) do
+    {:noreply, put_flash(socket, :error, "Unknown Docker action: #{action}")}
+  end
+
+  def handle_event("docker-action", _params, socket), do: {:noreply, socket}
+
+  def handle_event("docker-logs", %{"name" => name}, socket) do
     case socket.assigns.docker do
       %{server_id: sid} = d ->
-        case Services.docker_inspect(sid, name) do
-          {:ok, data} ->
-            {:noreply,
-             assign(socket, :docker, %{
-               d
-               | inspect: %{name: name, data: Jason.encode!(data, pretty: true)}
-             })}
+        {:noreply, fetch_docker_logs(socket, sid, name, logs_opts(d))}
 
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, "Inspect failed: #{inspect(reason)}")}
-        end
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-logs-tail", %{"tail" => tail}, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid, logs: %{name: name, timestamps: ts}} ->
+        {:ok, n} = parse_log_tail(tail)
+        {:noreply, fetch_docker_logs(socket, sid, name, tail: n, timestamps: ts)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-logs-timestamps", _params, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid, logs: %{name: name, tail: tail, timestamps: ts}} ->
+        {:noreply, fetch_docker_logs(socket, sid, name, tail: tail, timestamps: !ts)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-logs-filter", %{"filter" => filter}, socket) do
+    {:noreply,
+     assign_docker(socket, fn
+       %{logs: %{} = logs} = d -> %{d | logs: %{logs | filter: filter}}
+       d -> d
+     end)}
+  end
+
+  def handle_event("docker-close-logs", _params, socket) do
+    {:noreply, assign_docker(socket, fn d -> %{d | logs: nil, logs_ref: nil} end)}
+  end
+
+  def handle_event("docker-stats", _params, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} -> {:noreply, fetch_docker_stats(socket, sid)}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-inspect", %{"name" => name}, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:docker_inspect_done, ref, sid, name, Services.docker_inspect(sid, name)})
+        end)
+
+        {:noreply,
+         assign(socket, :docker, %{socket.assigns.docker | inspect: :loading, inspect_ref: ref})}
 
       _ ->
         {:noreply, socket}
@@ -953,11 +1021,105 @@ defmodule MarsadWeb.DesktopLive do
   end
 
   def handle_event("docker-close-inspect", _params, socket) do
-    {:noreply, assign_docker(socket, fn d -> %{d | inspect: nil} end)}
+    {:noreply, assign_docker(socket, fn d -> %{d | inspect: nil, inspect_ref: nil} end)}
   end
 
   def handle_event("docker-close-stats", _params, socket) do
-    {:noreply, assign_docker(socket, fn d -> %{d | stats: nil} end)}
+    {:noreply, assign_docker(socket, fn d -> %{d | stats: nil, stats_ref: nil} end)}
+  end
+
+  def handle_event("docker-rmi", %{"id" => id}, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:docker_rmi_done, ref, sid, id, Services.docker_rmi(sid, id)})
+        end)
+
+        {:noreply,
+         assign_docker(socket, fn d ->
+           %{d | busy: %{action: "remove-image", name: id}, action_ref: ref}
+         end)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-prune", _params, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:docker_prune_done, ref, sid, Services.docker_prune(sid)})
+        end)
+
+        {:noreply,
+         assign_docker(socket, fn d ->
+           %{d | busy: %{action: "prune", name: ""}, action_ref: ref}
+         end)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-stack-toggle", %{"name" => name}, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} = d ->
+        if d.expanded_stack == name do
+          {:noreply, assign(socket, :docker, %{d | expanded_stack: nil})}
+        else
+          ref = make_ref()
+          lv = self()
+
+          Task.start(fn ->
+            config = stack_config(d, name)
+
+            result =
+              if config, do: Services.compose_services(sid, config), else: {:error, :no_config}
+
+            send(lv, {:docker_stack_services_done, ref, sid, name, result})
+          end)
+
+          {:noreply,
+           assign(socket, :docker, %{
+             d
+             | expanded_stack: name,
+               stack_services: :loading,
+               stacks_ref: ref
+           })}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("docker-compose-action", %{"service" => service}, socket) do
+    case socket.assigns.docker do
+      %{server_id: sid, expanded_stack: project} = d when not is_nil(project) ->
+        config = stack_config(d, project)
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          result = Services.compose_action(sid, config || "", "restart", service)
+          send(lv, {:docker_compose_done, ref, sid, project, service, result})
+        end)
+
+        {:noreply,
+         assign_docker(socket, fn dd ->
+           %{dd | busy: %{action: "restart", name: service}, action_ref: ref}
+         end)}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   def handle_event("systemd-server", %{"server_id" => ""}, socket) do
@@ -1481,6 +1643,28 @@ defmodule MarsadWeb.DesktopLive do
         socket
       end
 
+    # Live docker stats: refresh while visible (stale-while-revalidate, no skeleton flash).
+    socket =
+      case socket.assigns.docker do
+        %{server_id: sid, stats: stats, stats_ref: nil} = d
+        when is_list(stats) and not is_nil(sid) ->
+          if docker_window_open?(socket) do
+            ref = make_ref()
+            lv = self()
+
+            Task.start(fn ->
+              send(lv, {:docker_stats_done, ref, sid, Services.docker_stats(sid)})
+            end)
+
+            assign(socket, :docker, %{d | stats_ref: ref})
+          else
+            socket
+          end
+
+        _ ->
+          socket
+      end
+
     {:noreply, socket}
   end
 
@@ -1681,6 +1865,243 @@ defmodule MarsadWeb.DesktopLive do
 
   # Honest pill state: a live shell process means "connected", not
   # "a command is running" (only the remote shell knows that).
+  def handle_info({:docker_list, ref, sid, result}, socket) do
+    if docker_ref?(socket, :list_ref, ref, sid) do
+      {:noreply, assign_docker(socket, fn d -> %{d | data: result, list_ref: nil} end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_action_done, ref, sid, action, name, result}, socket) do
+    if docker_ref?(socket, :action_ref, ref, sid) do
+      past = Services.action_past(action)
+
+      socket =
+        case result do
+          {:ok, _} ->
+            Services.audit(sid, "docker_#{action}", name, "ok")
+
+            socket
+            |> put_flash(:info, "Container #{past}.")
+            |> assign_docker(fn d ->
+              %{d | busy: nil, action_ref: nil, audit: Services.list_audit(sid)}
+            end)
+            |> reload_docker_list()
+
+          {:error, reason} ->
+            Services.audit(sid, "docker_#{action}", name, "failed: #{inspect(reason)}")
+
+            socket
+            |> put_flash(:error, "Docker #{action} failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | busy: nil, action_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_logs_done, ref, sid, name, opts, result}, socket) do
+    if docker_ref?(socket, :logs_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, text} ->
+            assign_docker(socket, fn d ->
+              %{
+                d
+                | logs: %{
+                    name: name,
+                    text: text,
+                    tail: Keyword.get(opts, :tail, 200),
+                    timestamps: Keyword.get(opts, :timestamps, false),
+                    filter: ""
+                  },
+                  logs_ref: nil
+              }
+            end)
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Logs failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | logs: nil, logs_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_stats_done, ref, sid, result}, socket) do
+    if docker_ref?(socket, :stats_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, stats} ->
+            assign_docker(socket, fn d -> %{d | stats: stats, stats_ref: nil} end)
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Stats failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | stats_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_inspect_done, ref, sid, name, result}, socket) do
+    if docker_ref?(socket, :inspect_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, data} ->
+            assign_docker(socket, fn d ->
+              %{d | inspect: %{name: name, data: data}, inspect_ref: nil}
+            end)
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Inspect failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | inspect: nil, inspect_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_images_done, ref, sid, result}, socket) do
+    if docker_ref?(socket, :images_ref, ref, sid) do
+      {:noreply, assign_docker(socket, fn d -> %{d | images: result, images_ref: nil} end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_stacks_done, ref, sid, result}, socket) do
+    if docker_ref?(socket, :stacks_ref, ref, sid) do
+      {:noreply, assign_docker(socket, fn d -> %{d | stacks: result, stacks_ref: nil} end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_stack_services_done, ref, sid, project, result}, socket) do
+    if docker_ref?(socket, :stacks_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, services} ->
+            assign_docker(socket, fn d ->
+              %{d | stack_services: %{project: project, services: services}, stacks_ref: nil}
+            end)
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Stack services failed: #{inspect(reason)}")
+            |> assign_docker(fn d ->
+              %{d | stack_services: nil, stacks_ref: nil, expanded_stack: nil}
+            end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_compose_done, ref, sid, project, service, result}, socket) do
+    if docker_ref?(socket, :action_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, _} ->
+            Services.audit(sid, "docker_compose_restart", "#{project}/#{service}", "ok")
+
+            socket
+            |> put_flash(:info, "Service restarted.")
+            |> assign_docker(fn d ->
+              %{d | busy: nil, action_ref: nil, audit: Services.list_audit(sid)}
+            end)
+
+          {:error, reason} ->
+            Services.audit(
+              sid,
+              "docker_compose_restart",
+              "#{project}/#{service}",
+              "failed: #{inspect(reason)}"
+            )
+
+            socket
+            |> put_flash(:error, "Restart failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | busy: nil, action_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_rmi_done, ref, sid, id, result}, socket) do
+    if docker_ref?(socket, :action_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, out} ->
+            Services.audit(sid, "docker_rmi", id, String.slice(out, 0, 200))
+
+            socket
+            |> put_flash(:info, "Image removed.")
+            |> assign_docker(fn d ->
+              %{d | busy: nil, action_ref: nil, audit: Services.list_audit(sid)}
+            end)
+            |> refresh_docker_images()
+
+          {:error, reason} ->
+            Services.audit(sid, "docker_rmi", id, "failed: #{inspect(reason)}")
+
+            socket
+            |> put_flash(:error, "Remove image failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | busy: nil, action_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:docker_prune_done, ref, sid, result}, socket) do
+    if docker_ref?(socket, :action_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, out} ->
+            Services.audit(sid, "docker_prune", "", String.slice(out, 0, 200))
+
+            socket
+            |> put_flash(:info, "Prune finished.")
+            |> assign_docker(fn d ->
+              %{d | busy: nil, action_ref: nil, audit: Services.list_audit(sid)}
+            end)
+            |> refresh_docker_images()
+            |> reload_docker_list()
+
+          {:error, reason} ->
+            Services.audit(sid, "docker_prune", "", "failed: #{inspect(reason)}")
+
+            socket
+            |> put_flash(:error, "Prune failed: #{inspect(reason)}")
+            |> assign_docker(fn d -> %{d | busy: nil, action_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
   defp term_shell_state(shells, wid) do
     case Map.get(shells, wid) do
       %{pid: pid, open: true} when is_pid(pid) -> if Process.alive?(pid), do: :open, else: :dead
@@ -1810,29 +2231,158 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
+  defp fresh_docker_state(server_id) do
+    %{
+      server_id: server_id,
+      data: nil,
+      list_ref: nil,
+      filter: "",
+      status: "all",
+      sort: "name",
+      tab: "containers",
+      logs: nil,
+      logs_ref: nil,
+      stats: nil,
+      stats_ref: nil,
+      inspect: nil,
+      inspect_ref: nil,
+      busy: nil,
+      action_ref: nil,
+      images: nil,
+      images_ref: nil,
+      stacks: nil,
+      stacks_ref: nil,
+      expanded_stack: nil,
+      stack_services: nil,
+      audit: []
+    }
+  end
+
   defp load_docker(socket, server_id) do
-    data =
-      case Services.docker_containers(server_id) do
-        {:ok, containers} -> {:ok, containers}
-        {:error, _} = error -> error
-      end
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:docker_list, ref, server_id, Services.docker_containers(server_id)})
+    end)
 
     assign(socket, :docker, %{
-      server_id: server_id,
-      data: data,
-      logs: nil,
-      stats: nil,
-      inspect: nil
+      fresh_docker_state(server_id)
+      | list_ref: ref,
+        audit: Services.list_audit(server_id)
     })
   end
 
-  defp reload_docker(%{assigns: %{docker: %{server_id: sid}}} = socket),
-    do: load_docker(socket, sid)
+  # Refreshes only the container list, preserving open panels/filters.
+  defp reload_docker_list(socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} = d ->
+        ref = make_ref()
+        lv = self()
 
-  defp reload_docker(socket), do: socket
+        Task.start(fn ->
+          send(lv, {:docker_list, ref, sid, Services.docker_containers(sid)})
+        end)
+
+        assign(socket, :docker, %{d | data: nil, list_ref: ref})
+
+      _ ->
+        socket
+    end
+  end
 
   defp assign_docker(%{assigns: %{docker: nil}} = socket, _fun), do: socket
   defp assign_docker(socket, fun), do: assign(socket, :docker, fun.(socket.assigns.docker))
+
+  defp docker_ref?(socket, field, ref, sid) do
+    case socket.assigns.docker do
+      %{server_id: ^sid} = d -> Map.get(d, field) == ref
+      _ -> false
+    end
+  end
+
+  defp logs_opts(%{logs: %{tail: tail, timestamps: timestamps}}),
+    do: [tail: tail, timestamps: timestamps]
+
+  defp logs_opts(_), do: [tail: 200, timestamps: false]
+
+  defp parse_log_tail(tail) do
+    case Integer.parse(to_string(tail)) do
+      {n, ""} when n in [50, 100, 200, 500, 1000] -> {:ok, n}
+      _ -> {:ok, 200}
+    end
+  end
+
+  defp stack_config(%{stacks: {:ok, projects}}, name) do
+    case Enum.find(projects, &(&1.name == name)) do
+      %{config: ""} -> nil
+      %{config: config} -> config
+      _ -> nil
+    end
+  end
+
+  defp stack_config(_, _), do: nil
+
+  defp valid_docker_status(s) when s in ~w(all running exited), do: s
+  defp valid_docker_status(_), do: "all"
+
+  defp valid_docker_sort(s) when s in ~w(name state image), do: s
+  defp valid_docker_sort(_), do: "name"
+
+  defp docker_window_open?(socket) do
+    Enum.any?(socket.assigns.windows, &(&1.app == "docker"))
+  end
+
+  defp fetch_docker_logs(socket, sid, name, opts) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:docker_logs_done, ref, sid, name, opts, Services.docker_logs(sid, name, opts)})
+    end)
+
+    assign(socket, :docker, %{socket.assigns.docker | logs: :loading, logs_ref: ref})
+  end
+
+  defp fetch_docker_stats(socket, sid) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:docker_stats_done, ref, sid, Services.docker_stats(sid)})
+    end)
+
+    assign_docker(socket, fn d -> %{d | stats_ref: ref} end)
+  end
+
+  defp fetch_docker_images(socket, sid) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:docker_images_done, ref, sid, Services.docker_images(sid)})
+    end)
+
+    assign(socket, :docker, %{socket.assigns.docker | images: :loading, images_ref: ref})
+  end
+
+  defp fetch_docker_stacks(socket, sid) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:docker_stacks_done, ref, sid, Services.compose_projects(sid)})
+    end)
+
+    assign(socket, :docker, %{socket.assigns.docker | stacks: :loading, stacks_ref: ref})
+  end
+
+  defp refresh_docker_images(socket) do
+    case socket.assigns.docker do
+      %{server_id: sid} -> fetch_docker_images(socket, sid)
+      _ -> socket
+    end
+  end
 
   defp ensure_systemd(%{assigns: %{systemd: %{}}} = socket), do: socket
 

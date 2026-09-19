@@ -5,6 +5,26 @@ This is a web application written using the Phoenix web framework.
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
+## Marsad project conventions (learned, do not regress)
+
+- **daisyUI is allowed here.** The generic rule below forbidding it is overridden by explicit user approval; `assets/css/app.css` uses the daisyUI Tailwind plugin.
+- **Auth model**: `live_session :app` (`LiveAuth :ensure`) + `:guest` (`:guest`) + `:public` (offline page only), `RequireAdmin` pipeline for controllers, `RedirectIfAdmin` for setup/login. Fresh installs (no admin) redirect to `/setup`. Session writes happen in plain controllers (`AuthController`), never from LiveView.
+- **DesktopLive grouping**: keep all `handle_event/3` clauses contiguous and all `handle_info/2` clauses contiguous — the compiler emits group warnings that fail `mix precommit` (`--warnings-as-errors`).
+- **Streams decision**: `DesktopLive` collections are small and bounded (servers, files, procs, containers), so plain assigns are used deliberately (documented in its moduledoc). Do not "migrate to streams" without cause.
+- **HEEx gotchas proven in this repo**:
+  - Inside `phx-no-curly-interpolation`, only `@assigns` interpolate — function calls must use `<%= ... %>`.
+  - Never nest `<form>` elements; merge into one form whose single `phx-change` reads all fields.
+  - The `hidden` attribute loses to Tailwind's `.flex`; hide overlays with inline `style="display: none;"` driven from JS.
+  - Never set `layout: {Layouts, :root}` on a `live_session` — it nests the root layout twice (duplicate IDs).
+  - Prefer precomputing values in Elixir assigns over unqualified helper calls inside `:for` comprehensions.
+- **Tests (SQLite + sandbox)**:
+  - Any test touching the DB must use `async: false` — concurrent writes hit "database is locked".
+  - `Registry`/`DynamicSupervisor` are global (not sandboxed): stub setups must kill stale entries via `terminate_child`, wait for unregister, and retry `start_link` (see `start_stub` helpers). Same for `on_exit` cleanup.
+  - SSH-backed flows use `FileSessionStub` (exec/sftp); PTY shell flows use `FakeShellTransport` via `config :marsad, :shell_transport` (test env only). Password hashing is cheap in test (`:pbkdf2_iterations` config).
+  - `assert_push_event` matches the first pushed event — drain intermediate pushes (e.g. "connecting…") before asserting later ones.
+- **Elixir gotcha**: `~s(...)` sigils do not nest inner parens — test data with parentheses must use another delimiter (e.g. `~s|...|`).
+- **Prod boot is strict**: missing `MARSAD_VAULT_KEY` raises at startup by design; never reintroduce a silent dev-key fallback in `runtime.exs`.
+
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content

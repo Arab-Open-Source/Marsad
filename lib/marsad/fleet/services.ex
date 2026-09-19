@@ -40,27 +40,81 @@ defmodule Marsad.Fleet.Services do
     end
   end
 
-  @doc "Starts/stops/restarts one container."
+  @docker_actions ~w(start stop restart remove)
+
+  @doc "Container actions (`start`/`stop`/`restart`/`rm -f`). Unknown actions are rejected, never crash."
   @spec docker_action(pos_integer(), binary(), binary()) :: {:ok, binary()} | {:error, term()}
-  def docker_action(server_id, action, name)
-      when action in ["start", "stop", "restart"] do
+  def docker_action(server_id, action, name) when action in @docker_actions do
+    cmd = if action == "remove", do: "docker rm -f #{name}", else: "docker #{action} #{name}"
+
     with :ok <- validate_name(name),
-         {:ok, %{stdout: out, stderr: err}} <- Fleet.exec(server_id, "docker #{action} #{name}") do
+         {:ok, %{stdout: out, stderr: err}} <- Fleet.exec(server_id, cmd) do
       if docker_unavailable?(out <> err),
         do: {:error, :docker_unavailable},
         else: {:ok, String.trim(out <> err)}
     end
   end
 
-  @doc "Tails container logs (stdout + stderr merged)."
-  @spec docker_logs(pos_integer(), binary()) :: {:ok, binary()} | {:error, term()}
-  def docker_logs(server_id, name) do
+  def docker_action(_server_id, _action, _name), do: {:error, :invalid_action}
+
+  @doc "English past tense for container actions (for flash messages)."
+  @spec action_past(binary()) :: binary()
+  def action_past("start"), do: "started"
+  def action_past("stop"), do: "stopped"
+  def action_past("restart"), do: "restarted"
+  def action_past("remove"), do: "removed"
+  def action_past(action), do: "#{action}ed"
+
+  @doc "Supported container actions."
+  def docker_actions, do: @docker_actions
+
+  @log_tails [50, 100, 200, 500, 1000]
+
+  @doc """
+  Tails container logs (stdout + stderr merged), capped at 200KB.
+
+  Options: `tail:` (one of 50/100/200/500/1000, default 200),
+  `timestamps:` (prepend `-t` RFC3339 stamps, default false).
+  """
+  @spec docker_logs(pos_integer(), binary(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def docker_logs(server_id, name, opts \\ []) do
+    tail = Keyword.get(opts, :tail, 200)
+    tail = if tail in @log_tails, do: tail, else: 200
+
+    flags =
+      if Keyword.get(opts, :timestamps, false), do: "--tail #{tail} -t", else: "--tail #{tail}"
+
     with :ok <- validate_name(name),
          {:ok, %{stdout: out, stderr: err}} <-
-           Fleet.exec(server_id, "docker logs --tail 200 #{name} 2>&1") do
+           Fleet.exec(server_id, "docker logs #{flags} #{name} 2>&1 | head -c 200000") do
       {:ok, out <> err}
     end
   end
+
+  @doc "Log tail sizes offered by the UI."
+  def log_tails, do: @log_tails
+
+  @max_log_download 5_000_000
+
+  @doc """
+  Full log download (newest bytes win): streams `docker logs` through
+  `tail -c` so the transfer never exceeds #{div(@max_log_download, 1_000_000)}MB
+  no matter how chatty the container is. Binary-safe.
+  """
+  @spec docker_logs_download(pos_integer(), binary(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def docker_logs_download(server_id, name, opts \\ []) do
+    ts = if Keyword.get(opts, :timestamps, false), do: "-t ", else: ""
+
+    with :ok <- validate_name(name),
+         {:ok, %{stdout: out, stderr: err}} <-
+           Fleet.exec(server_id, "docker logs #{ts}#{name} 2>&1 | tail -c #{@max_log_download}") do
+      {:ok, out <> err}
+    end
+  end
+
+  @doc "Byte cap applied to log downloads."
+  def max_log_download, do: @max_log_download
 
   @doc "Live stats (`docker stats --no-stream`)."
   @spec docker_stats(pos_integer()) :: {:ok, [map()]} | {:error, term()}
@@ -149,6 +203,211 @@ defmodule Marsad.Fleet.Services do
   defp docker_unavailable?(text) do
     String.contains?(text, "Cannot connect to the Docker daemon") or
       String.contains?(text, "command not found") or String.contains?(text, "docker: not found")
+  end
+
+  # -- Docker images ------------------------------------------------------------
+
+  @type image :: %{
+          repository: binary(),
+          tag: binary(),
+          id: binary(),
+          size: binary(),
+          created: binary()
+        }
+
+  @doc "Lists local images (`docker images`)."
+  @spec docker_images(pos_integer()) :: {:ok, [image()]} | {:error, term()}
+  def docker_images(server_id) do
+    case Fleet.exec(server_id, "docker images --format '{{json .}}' 2>&1") do
+      {:ok, %{stdout: out, stderr: err}} ->
+        if docker_unavailable?(out <> err),
+          do: {:error, :docker_unavailable},
+          else: {:ok, parse_docker_images(out)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc "Parses `docker images --format '{{json .}}'` output (one object per line)."
+  @spec parse_docker_images(binary()) :: [image()]
+  def parse_docker_images(out) do
+    out
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(fn line ->
+      case Jason.decode(line) do
+        {:ok, m} ->
+          [
+            %{
+              repository: to_string(m["Repository"] || ""),
+              tag: to_string(m["Tag"] || ""),
+              id: String.slice(to_string(m["ID"] || ""), 0, 12),
+              size: to_string(m["Size"] || ""),
+              created: to_string(m["CreatedSince"] || m["CreatedAt"] || "")
+            }
+          ]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  @doc "Removes one image (`docker rmi`)."
+  @spec docker_rmi(pos_integer(), binary()) :: {:ok, binary()} | {:error, term()}
+  def docker_rmi(server_id, image_id) do
+    with :ok <- validate_name(image_id),
+         {:ok, %{stdout: out, stderr: err}} <-
+           Fleet.exec(server_id, "docker rmi #{image_id} 2>&1") do
+      if docker_unavailable?(out <> err),
+        do: {:error, :docker_unavailable},
+        else: {:ok, String.trim(out <> err)}
+    end
+  end
+
+  @doc "Prunes unused images and stopped containers (`-f`, non-interactive)."
+  @spec docker_prune(pos_integer()) :: {:ok, binary()} | {:error, term()}
+  def docker_prune(server_id) do
+    case Fleet.exec(server_id, "docker image prune -f 2>&1; docker container prune -f 2>&1") do
+      {:ok, %{stdout: out, stderr: err}} ->
+        if docker_unavailable?(out <> err),
+          do: {:error, :docker_unavailable},
+          else: {:ok, String.trim(out <> err)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # -- Docker Compose -------------------------------------------------------------
+
+  @type project :: %{name: binary(), status: binary(), config: binary()}
+  @type service :: %{
+          name: binary(),
+          service: binary(),
+          state: binary(),
+          status: binary(),
+          ports: binary()
+        }
+
+  @doc "Lists compose projects (`docker compose ls`)."
+  @spec compose_projects(pos_integer()) :: {:ok, [project()]} | {:error, term()}
+  def compose_projects(server_id) do
+    case Fleet.exec(server_id, "docker compose ls --format '{{json .}}' 2>&1") do
+      {:ok, %{stdout: out, stderr: err}} ->
+        cond do
+          compose_unavailable?(out <> err) -> {:error, :compose_unavailable}
+          true -> {:ok, parse_compose_json(out, &compose_project/1)}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc "Lists services of one compose project (by its config file)."
+  @spec compose_services(pos_integer(), binary()) :: {:ok, [service()]} | {:error, term()}
+  def compose_services(server_id, config_file) do
+    quoted = Marsad.Helpers.Text.shell_quote(config_file)
+
+    case Fleet.exec(server_id, "docker compose -f #{quoted} ps --format '{{json .}}' 2>&1") do
+      {:ok, %{stdout: out, stderr: err}} ->
+        cond do
+          compose_unavailable?(out <> err) -> {:error, :compose_unavailable}
+          true -> {:ok, parse_compose_json(out, &compose_service/1)}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc "Restarts/stops/starts one compose service."
+  @spec compose_action(pos_integer(), binary(), binary(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def compose_action(server_id, config_file, action, service)
+      when action in ["start", "stop", "restart"] do
+    quoted = Marsad.Helpers.Text.shell_quote(config_file)
+
+    with :ok <- validate_name(service),
+         {:ok, %{stdout: out, stderr: err, status: status}} <-
+           Fleet.exec(server_id, "docker compose -f #{quoted} #{action} #{service} 2>&1") do
+      cond do
+        compose_unavailable?(out <> err) -> {:error, :compose_unavailable}
+        status == 0 -> {:ok, String.trim(out <> err)}
+        true -> {:error, {:action_failed, String.trim(out <> err)}}
+      end
+    end
+  end
+
+  def compose_action(_server_id, _config, _action, _service), do: {:error, :invalid_action}
+
+  defp compose_project(m) do
+    %{
+      name: to_string(m["Name"] || ""),
+      status: to_string(m["Status"] || ""),
+      config: m["ConfigFiles"] |> to_string() |> String.split(",", trim: true) |> List.first("")
+    }
+  end
+
+  defp compose_service(m) do
+    %{
+      name: to_string(m["Name"] || ""),
+      service: to_string(m["Service"] || ""),
+      state: to_string(m["State"] || ""),
+      status: to_string(m["Status"] || ""),
+      ports: to_string(m["Publishers"] || m["Ports"] || "")
+    }
+  end
+
+  @doc "Parses compose JSON output (array or newline-delimited objects)."
+  @spec parse_compose_json(binary(), (map() -> map())) :: [map()]
+  def parse_compose_json(out, fun) do
+    trimmed = String.trim(out)
+
+    objects =
+      case Jason.decode(trimmed) do
+        {:ok, list} when is_list(list) -> list
+        {:ok, map} when is_map(map) -> [map]
+        _ -> trimmed |> String.split("\n", trim: true) |> Enum.flat_map(&decode_line/1)
+      end
+
+    objects
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fun)
+    |> Enum.reject(&(&1.name == "" and &1[:service] in [nil, ""]))
+  end
+
+  defp decode_line(line) do
+    case Jason.decode(line) do
+      {:ok, m} when is_map(m) -> [m]
+      _ -> []
+    end
+  end
+
+  defp compose_unavailable?(text) do
+    String.contains?(text, "not a docker command") or
+      String.contains?(text, "unknown shorthand flag") or
+      String.contains?(text, "Cannot connect to the Docker daemon") or
+      String.contains?(text, "docker: not found")
+  end
+
+  # -- Audit trail ------------------------------------------------------------------
+
+  @doc "Recent audit entries for a server (newest first). Never raises."
+  @spec list_audit(pos_integer(), pos_integer()) :: [map()]
+  def list_audit(server_id, limit \\ 20) do
+    import Ecto.Query, warn: false
+
+    Marsad.AuditLog
+    |> where([a], a.server_id == ^server_id)
+    |> order_by([a], desc: a.inserted_at)
+    |> limit(^limit)
+    |> Marsad.Repo.all()
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
   end
 
   @doc "Logs an audit entry (best-effort, never fails the caller)."

@@ -2,7 +2,7 @@
 
 ![Marsad Logo](priv/static/images/logo.png)
 
-A Phoenix LiveView server fleet management dashboard with a mini-OS desktop interface. Manage your VPS fleet through an elegant browser-based desktop with SSH terminal, file explorer, Docker container management, systemd service control, nginx configuration, and live metrics -- all wrapped in a polished, themeable UI.
+A Phoenix LiveView server fleet management dashboard with a mini-OS desktop interface. Manage your VPS fleet through an elegant browser-based desktop with SSH terminal, file explorer, Docker container management, systemd service control, nginx configuration, and live metrics -- all wrapped in a polished, themeable UI and protected by a local admin login.
 
 ## Table of Contents
 
@@ -29,6 +29,12 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 - Real-time updates via LiveView's WebSocket connection
 - Themeable UI with light/dark modes and six accent colors
 - Code editors with syntax highlighting for remote files
+- Offline mode: a dedicated `/offline` page plus an automatic overlay when the connection drops
+
+### Authentication
+- First-run setup at `/setup` creates the local admin account (username + password, PBKDF2-hashed)
+- Login at `/login`; every app route requires authentication
+- Change the password or fully reset auth from the Settings app
 
 ### Server Fleet Management
 - Add, edit, and remove SSH server connections
@@ -43,6 +49,8 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 
 ### SFTP File Explorer
 - Remote directory browsing with breadcrumb navigation
+- Smart recursive search with a query language: `word` (AND), `"exact phrase"`, `-exclude`, `ext:conf,json` (or `*.conf`), `type:dirs`, `size:>10M`, `depth:3`, `limit:50`, `all` (include `.git`/`node_modules`)
+- Ranked results with truncation notice and removable filter chips
 - File upload (up to 50 MB per file, 3 concurrent)
 - File preview with syntax highlighting
 - Inline code editing with save-to-remote
@@ -57,11 +65,15 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 - Auto-refresh with configurable interval (minimum 5 seconds)
 
 ### Docker Container Management
-- List all containers with status, image, and port information
-- Start, stop, and restart containers
-- View container logs (last 200 lines)
-- Live resource stats (CPU, memory, network, block I/O)
-- Full container inspection via `docker inspect`
+- Tabbed panel: Containers, Images, Stacks (Compose), Activity (audit trail)
+- List all containers with plain-language status badges (Running/Stopped/Restarting/…) and health pills
+- Search, filter by state, and sort containers
+- Start, stop, restart, and remove containers (async, non-blocking)
+- View container logs with tail-size, timestamps, text filter, and full-log download (up to 5 MB)
+- Live resource stats with auto-refresh (CPU, memory, network, block I/O)
+- Full container inspection with overview/mounts/network cards plus raw JSON
+- Image list with remove and prune-unused actions
+- Compose projects with per-service restart
 
 ### Systemd Service Control
 - List all service units with load, active, sub, and description states
@@ -85,35 +97,41 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 
 **Fleet** -- Server CRUD, SSH session lifecycle, and remote execution. Uses a Registry and DynamicSupervisor to manage one `ServerSession` process per active server. Sessions are started lazily and terminated when a server is updated or deleted.
 
+**ServerShell** -- One persistent PTY shell per terminal window (separate SSH connection per window, keyed `{:shell, server_id, window_id, liveview_pid}`). Streams raw keystrokes in and screen bytes out; dies with its LiveView.
+
 **Services** -- Pure functional wrappers around Docker, systemd, and nginx commands. All remote names interpolated into shell commands are strictly validated against an allow-list regex to prevent command injection.
 
-**SSH** -- A behaviour defining the remote transport interface. The default implementation (`SshAdapter`) uses OTP `:ssh` and `:ssh_sftp`. A future agent-based transport can implement this same behaviour without changing callers.
+**SSH** -- A behaviour defining the remote transport interface (exec plus interactive-shell primitives). The default implementation (`SshAdapter`) uses OTP `:ssh` and `:ssh_sftp`. A future agent-based transport can implement this same behaviour without changing callers.
+
+**Accounts** -- Local admin authentication (PBKDF2-HMAC-SHA256 via OTP `:crypto`, no extra deps), first-time setup guard, and session enforcement.
 
 **Metrics** -- Database-backed storage of server health snapshots with pruning of data older than 48 hours. Chart data is computed from snapshot history.
 
 **Settings** -- Key/value store for application settings (theme mode, accent color, metrics polling interval). Unknown or missing values fall back to curated defaults.
 
+**Files / Terminal** -- Pure domain helpers: the smart file-search query language and terminal copy/demo text live here so they are unit-testable without SSH.
+
 ### Connection Model
 
 ```
 Web Browser  <--WebSocket-->  LiveView Process
-                                  |
-                                  | (via Registry lookup)
-                                  v
-                           ServerSession (GenServer)
-                                  |
-                                  | (persistent SSH connection)
-                                  v
-                           Remote Linux Server
+                                   |
+                  +----------------+----------------+
+                  | (via Registry lookup)          |
+                  v                                v
+           ServerSession (GenServer)        ServerShell (GenServer)
+           one exec channel                        |  (own SSH connection
+           per command, no TTY                     v   + PTY per window)
+                            Remote Linux Server
 ```
 
-Each server gets a supervised GenServer that holds a long-lived SSH connection. On first use (command execution, file listing, etc.), the session establishes the connection, decrypts the stored credential, authenticates, and records the host key fingerprint. Subsequent operations reuse the connection. If the connection drops, the session transparently reconnects on the next request.
+Each server gets a supervised GenServer that holds a long-lived SSH connection. On first use (command execution, file listing, etc.), the session establishes the connection, decrypts the stored credential, authenticates, and records the host key fingerprint. Subsequent operations reuse the connection. If the connection drops, the session transparently reconnects on the next request. Interactive terminals additionally open one `ServerShell` per window with its own connection and PTY.
 
 ### Credential Security
 
 SSH secrets (passwords and private keys) are encrypted at rest using AES-256-GCM via OTP's `:crypto` module. The encryption key is read from the `:marsad, :vault_key` application environment variable (base64, 32 bytes). In dev and test environments, a non-secret fallback key is used so the application boots with zero setup.
 
-In production, you **must** set the `MARSAD_VAULT_KEY` environment variable. Losing this key means losing access to stored credentials.
+In production, you **must** set the `MARSAD_VAULT_KEY` environment variable — the app refuses to boot without it. Losing this key means losing access to stored credentials.
 
 ## Getting Started
 
@@ -149,7 +167,7 @@ mix phx.server
 
 4. Open your browser at `http://localhost:4000`.
 
-The root URL opens the desktop environment directly.
+On first run you land on `/setup`: create the local admin account, then sign in. Afterwards the root URL opens the desktop environment directly (guests are redirected to `/login`).
 
 ## Configuration
 
@@ -157,7 +175,7 @@ The root URL opens the desktop environment directly.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MARSAD_VAULT_KEY` | Production only | Dev fallback | Base64-encoded 32-byte key for AES-256-GCM credential encryption |
+| `MARSAD_VAULT_KEY` | Yes (enforced at boot) | Dev fallback | Base64-encoded 32-byte key for AES-256-GCM credential encryption |
 | `SECRET_KEY_BASE` | Production only | Dev fallback | Phoenix secret key for signing/encrypting cookies |
 | `DATABASE_PATH` | Production only | `marsad_dev.db` (dev) | Path to the SQLite database file |
 | `PORT` | No | `4000` | HTTP port to listen on |
@@ -210,30 +228,49 @@ lib/
   marsad/                        -- Application contexts (business logic)
     application.ex               -- OTP application and supervisor tree
     repo.ex                      -- Ecto repository
+    accounts.ex                  -- Local admin auth (PBKDF2, setup guard)
+    accounts/                    -- Admin schema + password hashing
+    audit_log.ex                 -- Audit trail schema
+    files.ex                     -- File browser domain + smart search query language
+    terminal.ex                  -- Terminal copy + demo-mode text
     fleet/                       -- Server fleet management
       server.ex                  -- Server schema and changesets
       server_session.ex          -- GenServer holding SSH connections
+      server_shell.ex            -- GenServer holding one PTY shell per terminal window
       credential_vault.ex        -- AES-256-GCM at-rest encryption
       services.ex                -- Docker, systemd, nginx operations
-      sys_info.ex                -- Health metrics collection and parsing
+      sys_info.ex                -- Health metrics collection and parsing (single-shot fetch)
     ssh/                         -- SSH transport layer
       ssh_adapter.ex             -- OTP :ssh / :ssh_sftp implementation
     metrics/                     -- Historical metrics
       snapshot.ex                -- Metrics snapshot schema
     settings/                    -- Application settings
+    helpers/text.ex              -- Shared text/size/mime formatting
   marsad_web/                    -- Web interface
     live/desktop_live.ex         -- Main LiveView (mini-OS desktop)
+    live/offline_live.ex         -- Public offline/limited-connection page
+    live_auth.ex                 -- on_mount hooks (:ensure / :guest)
+    plugs.ex                     -- RequireAdmin / RedirectIfAdmin plugs
     desktop/                     -- Panel components
-      docker_panel.ex            -- Docker container panel
+      docker_panel.ex            -- Docker panel (containers/images/stacks/activity tabs)
       systemd_panel.ex           -- Systemd service panel
       nginx_panel.ex             -- Nginx management panel
-    router.ex                    -- Routes
+    controllers/
+      auth_controller.ex         -- Setup/login pages + session writes
+      file_download_controller.ex -- Capped remote file downloads
+      docker_logs_controller.ex  -- Capped container log downloads
+      session_controller.ex      -- Logout
+    router.ex                    -- Routes (:app / :guest / :public live_sessions)
     endpoint.ex                  -- Phoenix endpoint
     telemetry.ex                 -- Telemetry metrics
 priv/
   repo/
     migrations/                  -- Ecto database migrations
   static/                        -- Compiled assets
+test/
+  support/
+    file_session_stub.ex         -- FIFO stub for exec/sftp flows
+    fake_shell_transport.ex      -- In-memory PTY transport for shell flows
 ```
 
 ## Production Deployment
