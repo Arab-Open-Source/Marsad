@@ -995,6 +995,25 @@ defmodule MarsadWeb.DesktopLive do
     {:noreply, assign_docker(socket, fn d -> %{d | logs: nil, logs_ref: nil} end)}
   end
 
+  def handle_event("docker-logs-collapse", _params, socket) do
+    {:noreply,
+     assign_docker(socket, fn
+       %{logs: %{} = logs} = d ->
+         %{d | logs: %{logs | collapsed: !Map.get(logs, :collapsed, false)}}
+
+       d ->
+         d
+     end)}
+  end
+
+  def handle_event("docker-logs-wrap", _params, socket) do
+    {:noreply,
+     assign_docker(socket, fn
+       %{logs: %{} = logs} = d -> %{d | logs: %{logs | wrap: !Map.get(logs, :wrap, false)}}
+       d -> d
+     end)}
+  end
+
   def handle_event("docker-stats", _params, socket) do
     case socket.assigns.docker do
       %{server_id: sid} -> {:noreply, fetch_docker_stats(socket, sid)}
@@ -1175,8 +1194,14 @@ defmodule MarsadWeb.DesktopLive do
       case socket.assigns.systemd do
         %{server_id: sid} = s ->
           case Services.systemd_logs(sid, name) do
-            {:ok, text} -> assign(socket, :systemd, %{s | logs: %{name: name, text: text}})
-            {:error, reason} -> put_flash(socket, :error, "Journal failed: #{inspect(reason)}")
+            {:ok, text} ->
+              assign(socket, :systemd, %{
+                s
+                | logs: %{name: name, text: text, collapsed: false, wrap: false}
+              })
+
+            {:error, reason} ->
+              put_flash(socket, :error, "Journal failed: #{inspect(reason)}")
           end
 
         _ ->
@@ -1188,6 +1213,25 @@ defmodule MarsadWeb.DesktopLive do
 
   def handle_event("systemd-close-logs", _params, socket) do
     {:noreply, assign_systemd(socket, fn s -> %{s | logs: nil} end)}
+  end
+
+  def handle_event("systemd-logs-collapse", _params, socket) do
+    {:noreply,
+     assign_systemd(socket, fn
+       %{logs: %{} = logs} = s ->
+         %{s | logs: %{logs | collapsed: !Map.get(logs, :collapsed, false)}}
+
+       s ->
+         s
+     end)}
+  end
+
+  def handle_event("systemd-logs-wrap", _params, socket) do
+    {:noreply,
+     assign_systemd(socket, fn
+       %{logs: %{} = logs} = s -> %{s | logs: %{logs | wrap: !Map.get(logs, :wrap, false)}}
+       s -> s
+     end)}
   end
 
   def handle_event("systemd-unit-preview", %{"name" => name}, socket) do
@@ -1282,6 +1326,18 @@ defmodule MarsadWeb.DesktopLive do
       _ ->
         {:noreply, socket}
     end
+  end
+
+  def handle_event("nginx-logs-collapse", _params, socket) do
+    {:noreply,
+     assign_nginx(socket, fn n ->
+       %{n | error_log_collapsed: !Map.get(n, :error_log_collapsed, false)}
+     end)}
+  end
+
+  def handle_event("nginx-logs-close", _params, socket) do
+    {:noreply,
+     assign_nginx(socket, fn n -> %{n | error_log: nil, error_log_collapsed: false} end)}
   end
 
   def handle_event("nginx-config", _params, socket) do
@@ -1944,7 +2000,9 @@ defmodule MarsadWeb.DesktopLive do
                     text: text,
                     tail: Keyword.get(opts, :tail, 200),
                     timestamps: Keyword.get(opts, :timestamps, false),
-                    filter: ""
+                    filter: "",
+                    collapsed: false,
+                    wrap: false
                   },
                   logs_ref: nil
               }
@@ -2493,7 +2551,8 @@ defmodule MarsadWeb.DesktopLive do
       files_filter: "",
       file_preview: nil,
       certs: nil,
-      certs_ref: nil
+      certs_ref: nil,
+      error_log_collapsed: false
     })
     |> assign(:nginx_load_ref, ref)
   end
@@ -2532,7 +2591,8 @@ defmodule MarsadWeb.DesktopLive do
       files_filter: filter || "",
       file_preview: preview,
       certs: nil,
-      certs_ref: nil
+      certs_ref: nil,
+      error_log_collapsed: false
     })
     |> assign(:nginx_load_ref, ref)
   end

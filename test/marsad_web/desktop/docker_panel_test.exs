@@ -192,7 +192,15 @@ defmodule MarsadWeb.Desktop.DockerPanelTest do
   end
 
   test "logs section has a download link with current options" do
-    logs = %{name: "web", text: "hi", tail: 200, timestamps: true, filter: ""}
+    logs = %{
+      name: "web",
+      text: "hi",
+      tail: 200,
+      timestamps: true,
+      filter: "",
+      collapsed: false,
+      wrap: false
+    }
 
     html =
       render_component(&DockerPanel.panel/1,
@@ -205,13 +213,46 @@ defmodule MarsadWeb.Desktop.DockerPanelTest do
     assert html =~ "timestamps=true"
   end
 
+  test "logs collapse hides body and wrap toggles class" do
+    base = %{name: "web", text: "a\nb\nc", tail: 200, timestamps: false, filter: ""}
+
+    open =
+      render_component(&DockerPanel.panel/1,
+        servers: servers(),
+        state: state(%{data: {:ok, []}, logs: Map.merge(base, %{collapsed: false, wrap: false})})
+      )
+
+    assert open =~ "docker-logs-collapse"
+    assert open =~ "3 lines"
+    refute open =~ "whitespace-pre-wrap"
+
+    shut =
+      render_component(&DockerPanel.panel/1,
+        servers: servers(),
+        state: state(%{data: {:ok, []}, logs: Map.merge(base, %{collapsed: true, wrap: false})})
+      )
+
+    assert shut =~ "3 lines hidden"
+    refute shut =~ "whitespace-pre-wrap"
+
+    wrapped =
+      render_component(&DockerPanel.panel/1,
+        servers: servers(),
+        state: state(%{data: {:ok, []}, logs: Map.merge(base, %{collapsed: false, wrap: true})})
+      )
+
+    assert wrapped =~ "whitespace-pre-wrap"
+  end
+
   test "logs section honors tail, timestamps toggle and line filter" do
     logs = %{
       name: "web",
       text: "INFO started\nERROR boom\nINFO done",
       tail: 200,
       timestamps: false,
-      filter: "error"
+      filter: "error",
+      collapsed: false,
+      wrap: false
     }
 
     html =

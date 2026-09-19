@@ -110,7 +110,7 @@ defmodule MarsadWeb.Desktop.NginxPanel do
                 <pre
                   class="mt-2 max-h-28 overflow-auto rounded-xl bg-black/85 p-2.5 font-mono text-[11.5px] leading-relaxed text-slate-100"
                   phx-no-curly-interpolation
-                >{st.test_output}</pre>
+                ><%= st.test_output %></pre>
                 <div class="mt-3 flex flex-wrap gap-1.5">
                   <button
                     phx-click="nginx-action"
@@ -301,9 +301,30 @@ defmodule MarsadWeb.Desktop.NginxPanel do
 
           <div class="rounded-2xl border border-base-content/10 bg-base-content/[0.03] p-4">
             <div class="flex items-center gap-2">
+              <button
+                :if={@state.error_log}
+                id="nginx-log-collapse"
+                phx-click="nginx-logs-collapse"
+                title={
+                  if @state.error_log_collapsed, do: "Expand error log", else: "Collapse error log"
+                }
+                aria-expanded={to_string(!@state.error_log_collapsed)}
+                aria-label="Toggle error log visibility"
+                class="rounded p-0.5 text-base-content/60 transition hover:bg-base-content/10 hover:text-base-content"
+              >
+                <.icon
+                  name={
+                    if @state.error_log_collapsed, do: "hero-chevron-right", else: "hero-chevron-down"
+                  }
+                  class="size-3.5"
+                />
+              </button>
               <p class="text-xs font-semibold uppercase tracking-wider text-base-content/50">
                 Error log
               </p>
+              <span :if={@state.error_log} class="font-mono text-[10px] text-base-content/40">
+                {count_lines(@state.error_log)} lines
+              </span>
               <button
                 id="nginx-log-load"
                 phx-click="nginx-logs"
@@ -311,8 +332,20 @@ defmodule MarsadWeb.Desktop.NginxPanel do
               >
                 {if @state.error_log, do: "Reload", else: "Load"} last 100 lines
               </button>
+              <button
+                :if={@state.error_log}
+                id="nginx-log-close"
+                phx-click="nginx-logs-close"
+                class="rounded p-0.5 text-base-content/60 transition hover:bg-base-content/10 hover:text-base-content"
+                aria-label="Close error log"
+              >
+                <.icon name="hero-x-mark" class="size-3.5" />
+              </button>
             </div>
-            <div :if={@state.error_log} class="mt-2 marsad-code-editor-wrap">
+            <div
+              :if={@state.error_log != nil and !@state.error_log_collapsed}
+              class="mt-2 marsad-code-editor-wrap"
+            >
               <textarea
                 id={"code-nginx-log-" <> to_string(@state.server_id)}
                 phx-hook="CodeEditor"
@@ -324,6 +357,12 @@ defmodule MarsadWeb.Desktop.NginxPanel do
                 class="hidden"
               ><%= @state.error_log %></textarea>
             </div>
+            <p
+              :if={@state.error_log != nil and @state.error_log_collapsed}
+              class="mt-2 text-[11px] text-base-content/40"
+            >
+              Collapsed — {count_lines(@state.error_log)} lines hidden. Expand to read.
+            </p>
           </div>
         </div>
       <% end %>
@@ -336,6 +375,12 @@ defmodule MarsadWeb.Desktop.NginxPanel do
 
   defp format_kb(bytes) when is_integer(bytes), do: "#{bytes}B"
   defp format_kb(_), do: "—"
+
+  defp count_lines(text) when is_binary(text) do
+    text |> String.split("\n", trim: true) |> length()
+  end
+
+  defp count_lines(_), do: 0
 
   # -- certificates section ---------------------------------------------------------
 

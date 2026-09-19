@@ -274,7 +274,43 @@ defmodule MarsadWeb.Desktop.SystemdPanel do
 
       <div :if={@state.logs} class="border-t border-base-content/10">
         <div class="flex items-center gap-2 bg-base-content/[0.04] px-4 py-1.5 font-mono text-[11px]">
+          <button
+            id="systemd-logs-collapse"
+            phx-click="systemd-logs-collapse"
+            title={
+              if Map.get(@state.logs, :collapsed, false),
+                do: "Expand journal",
+                else: "Collapse journal"
+            }
+            aria-expanded={to_string(!Map.get(@state.logs, :collapsed, false))}
+            aria-label="Toggle journal visibility"
+            class="rounded p-0.5 text-base-content/60 transition hover:bg-base-content/10 hover:text-base-content"
+          >
+            <.icon
+              name={
+                if Map.get(@state.logs, :collapsed, false),
+                  do: "hero-chevron-right",
+                  else: "hero-chevron-down"
+              }
+              class="size-3.5"
+            />
+          </button>
           <span class="truncate text-base-content/70">journal · {@state.logs.name}</span>
+          <span class="shrink-0 text-[10px] text-base-content/40">
+            {count_lines(@state.logs.text)} lines
+          </span>
+          <button
+            phx-click="systemd-logs-wrap"
+            title="Toggle line wrapping"
+            aria-pressed={to_string(Map.get(@state.logs, :wrap, false))}
+            class={[
+              "rounded px-1.5 py-0.5 text-[10px] transition",
+              Map.get(@state.logs, :wrap, false) && "acc-soft",
+              !Map.get(@state.logs, :wrap, false) && "text-base-content/50 hover:bg-base-content/10"
+            ]}
+          >
+            wrap
+          </button>
           <button
             id="systemd-logs-close"
             phx-click="systemd-close-logs"
@@ -285,9 +321,19 @@ defmodule MarsadWeb.Desktop.SystemdPanel do
           </button>
         </div>
         <pre
-          class="marsad-scroll max-h-56 overflow-auto bg-black/85 p-3 font-mono text-[11.5px] leading-relaxed text-slate-100"
+          :if={!Map.get(@state.logs, :collapsed, false)}
+          class={[
+            "marsad-scroll max-h-56 overflow-auto bg-black/85 p-3 font-mono text-[11.5px] leading-relaxed text-slate-100",
+            Map.get(@state.logs, :wrap, false) && "whitespace-pre-wrap break-all"
+          ]}
           phx-no-curly-interpolation
-        >{@state.logs.text}</pre>
+        ><%= @state.logs.text %></pre>
+        <p
+          :if={Map.get(@state.logs, :collapsed, false)}
+          class="px-4 py-2 text-[11px] text-base-content/40"
+        >
+          Collapsed — {count_lines(@state.logs.text)} lines hidden. Expand to read.
+        </p>
       </div>
 
       <div :if={@state.unit_preview} class="border-t border-base-content/10">
@@ -424,6 +470,12 @@ defmodule MarsadWeb.Desktop.SystemdPanel do
   end
 
   defp sorted_units(units, _), do: Enum.sort_by(units, &String.downcase(&1.unit))
+
+  defp count_lines(text) when is_binary(text) do
+    text |> String.split("\n", trim: true) |> length()
+  end
+
+  defp count_lines(_), do: 0
 
   defp count_states(units) do
     {active, failed, inactive} =

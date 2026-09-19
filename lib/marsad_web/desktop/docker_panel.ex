@@ -388,7 +388,23 @@ defmodule MarsadWeb.Desktop.DockerPanel do
     ~H"""
     <div class="border-t border-base-content/10">
       <div class="flex flex-wrap items-center gap-2 bg-base-content/[0.04] px-4 py-1.5 font-mono text-[11px]">
+        <button
+          id="docker-logs-collapse"
+          phx-click="docker-logs-collapse"
+          title={if @state.logs.collapsed, do: "Expand logs", else: "Collapse logs"}
+          aria-expanded={to_string(!@state.logs.collapsed)}
+          aria-label="Toggle logs visibility"
+          class="rounded p-0.5 text-base-content/60 transition hover:bg-base-content/10 hover:text-base-content"
+        >
+          <.icon
+            name={if @state.logs.collapsed, do: "hero-chevron-right", else: "hero-chevron-down"}
+            class="size-3.5"
+          />
+        </button>
         <span class="truncate text-base-content/70">logs · {@state.logs.name}</span>
+        <span class="shrink-0 text-[10px] text-base-content/40">
+          {log_line_count(@state.logs)} lines
+        </span>
         <form id="docker-logs-tail-form" phx-change="docker-logs-tail" class="flex items-center gap-1">
           <select
             id="docker-logs-tail"
@@ -428,6 +444,18 @@ defmodule MarsadWeb.Desktop.DockerPanel do
             aria-label="Filter log lines"
           />
         </label>
+        <button
+          phx-click="docker-logs-wrap"
+          title="Toggle line wrapping"
+          aria-pressed={to_string(@state.logs.wrap)}
+          class={[
+            "rounded px-1.5 py-0.5 text-[10px] transition",
+            @state.logs.wrap && "acc-soft",
+            !@state.logs.wrap && "text-base-content/50 hover:bg-base-content/10"
+          ]}
+        >
+          wrap
+        </button>
         <a
           id="docker-logs-download"
           href={
@@ -449,9 +477,19 @@ defmodule MarsadWeb.Desktop.DockerPanel do
         </button>
       </div>
       <pre
-        class="marsad-scroll max-h-56 overflow-auto bg-black/80 p-3 font-mono text-xs leading-relaxed text-slate-200"
+        :if={!@state.logs.collapsed}
+        class={[
+          "marsad-scroll max-h-56 overflow-auto bg-black/80 p-3 font-mono text-xs leading-relaxed text-slate-200",
+          @state.logs.wrap && "whitespace-pre-wrap break-all"
+        ]}
         phx-no-curly-interpolation
       ><%= filtered_logs(@state.logs) %></pre>
+      <p
+        :if={@state.logs.collapsed}
+        class="px-4 py-2 text-[11px] text-base-content/40"
+      >
+        Collapsed — {log_line_count(@state.logs)} lines hidden. Expand to read.
+      </p>
     </div>
     """
   end
@@ -468,6 +506,21 @@ defmodule MarsadWeb.Desktop.DockerPanel do
       |> Enum.join("\n")
     end
   end
+
+  defp log_line_count(%{text: text, filter: filter}) do
+    total = count_lines(text)
+
+    if String.trim(filter || "") == "" do
+      total
+    else
+      "#{count_lines(filtered_logs(%{text: text, filter: filter}))}/#{total}"
+    end
+  end
+
+  defp count_lines(text) when is_binary(text),
+    do: text |> String.split("\n", trim: true) |> length()
+
+  defp count_lines(_), do: 0
 
   # -- stats section ------------------------------------------------------------------
 
@@ -577,7 +630,7 @@ defmodule MarsadWeb.Desktop.DockerPanel do
             <pre
               class="marsad-scroll mt-2 max-h-64 overflow-auto rounded-lg bg-black/80 p-3 font-mono text-[11px] leading-relaxed text-slate-200"
               phx-no-curly-interpolation
-            >{Jason.encode!(@state.inspect.data, pretty: true)}</pre>
+            ><%= Jason.encode!(@state.inspect.data, pretty: true) %></pre>
           </div>
         </details>
       </div>

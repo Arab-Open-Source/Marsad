@@ -43,7 +43,8 @@ defmodule MarsadWeb.Desktop.PanelsTest do
         files_filter: "",
         file_preview: nil,
         certs: nil,
-        certs_ref: nil
+        certs_ref: nil,
+        error_log_collapsed: false
       },
       overrides
     )
@@ -128,6 +129,61 @@ defmodule MarsadWeb.Desktop.PanelsTest do
       )
 
     assert html =~ "systemd-panel"
+  end
+
+  test "systemd journal collapses, counts and wraps" do
+    logs = %{name: "nginx.service", text: "a\nb\nc", collapsed: false, wrap: false}
+
+    html =
+      render_component(&SystemdPanel.panel/1,
+        servers: servers(),
+        state: systemd_state(%{server_id: 1, data: {:ok, []}, logs: logs})
+      )
+
+    assert html =~ "systemd-logs-collapse"
+    assert html =~ "3 lines"
+    refute html =~ "whitespace-pre-wrap"
+
+    shut =
+      render_component(&SystemdPanel.panel/1,
+        servers: servers(),
+        state:
+          systemd_state(%{
+            server_id: 1,
+            data: {:ok, []},
+            logs: %{logs | collapsed: true, wrap: false}
+          })
+      )
+
+    assert shut =~ "3 lines hidden"
+    refute shut =~ "whitespace-pre-wrap"
+
+    wrapped =
+      render_component(&SystemdPanel.panel/1,
+        servers: servers(),
+        state:
+          systemd_state(%{
+            server_id: 1,
+            data: {:ok, []},
+            logs: %{logs | collapsed: false, wrap: true}
+          })
+      )
+
+    assert wrapped =~ "whitespace-pre-wrap"
+  end
+
+  test "nginx error log collapses, counts and closes" do
+    render = fn state ->
+      render_component(&NginxPanel.panel/1, servers: servers(), state: nginx_state(state))
+    end
+
+    html = render.(%{server_id: 1, error_log: "e1\ne2"})
+    assert html =~ "nginx-log-collapse"
+    assert html =~ "2 lines"
+    assert html =~ "nginx-log-close"
+
+    shut = render.(%{server_id: 1, error_log: "e1\ne2", error_log_collapsed: true})
+    assert shut =~ "2 lines hidden"
   end
 
   test "nginx panel empty, status and error states" do

@@ -155,6 +155,24 @@ defmodule MarsadWeb.DockerTest do
     wait_until(fn -> render(view) =~ "stamped" end)
   end
 
+  test "logs collapse and wrap toggle without refetch", %{conn: conn, stub: stub} do
+    {:ok, view, _} = live(conn, ~p"/")
+    open_docker(view, stub)
+
+    enqueue(stub, [exec_reply("line1\nline2\n")])
+    view |> element("#container-web button[phx-click=docker-logs]") |> render_click()
+    wait_until(fn -> render(view) =~ "2 lines" end)
+
+    view |> element("#docker-logs-collapse") |> render_click()
+    assert render(view) =~ "2 lines hidden"
+
+    view |> element("#docker-logs-collapse") |> render_click()
+    assert render(view) =~ "line1"
+
+    view |> element("button[phx-click=docker-logs-wrap]") |> render_click()
+    assert render(view) =~ "whitespace-pre-wrap"
+  end
+
   test "stats and inspect load async", %{conn: conn, stub: stub} do
     {:ok, view, _} = live(conn, ~p"/")
     open_docker(view, stub)
@@ -167,6 +185,8 @@ defmodule MarsadWeb.DockerTest do
     view |> element("#container-web button[phx-click=docker-inspect]") |> render_click()
     wait_until(fn -> render(view) =~ "Overview" end)
     assert render(view) =~ "nginx"
+    # Raw JSON block actually renders (no-curly-interpolation regression).
+    assert render(view) =~ "abc"
   end
 
   test "images tab lists, removes and prunes", %{conn: conn, stub: stub} do

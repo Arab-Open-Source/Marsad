@@ -124,6 +124,29 @@ defmodule MarsadWeb.NginxCertsTest do
     assert render(view) =~ "all valid"
   end
 
+  test "error log collapses and closes", %{conn: conn, stub: stub} do
+    {:ok, view, _} = live(conn, ~p"/")
+
+    enqueue(stub, [
+      exec_reply("active\n"),
+      exec_reply("syntax ok\ntest is successful\n"),
+      exec_reply("")
+    ])
+
+    view |> element("#icon-nginx") |> render_click()
+    wait_until(fn -> has_element?(view, "#nginx-log-load") end)
+
+    enqueue(stub, [exec_reply("2026/01/01 [error] boom\n2026/01/01 [warn] meh\n")])
+    view |> element("#nginx-log-load") |> render_click()
+    wait_until(fn -> render(view) =~ "2 lines" end)
+
+    view |> element("#nginx-log-collapse") |> render_click()
+    assert render(view) =~ "2 lines hidden"
+
+    view |> element("#nginx-log-close") |> render_click()
+    refute has_element?(view, "#nginx-log-close")
+  end
+
   test "critical certs raise a summary pill", %{conn: conn, stub: stub} do
     {:ok, view, _} = live(conn, ~p"/")
 

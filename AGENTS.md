@@ -12,7 +12,7 @@ This is a web application written using the Phoenix web framework.
 - **DesktopLive grouping**: keep all `handle_event/3` clauses contiguous and all `handle_info/2` clauses contiguous — the compiler emits group warnings that fail `mix precommit` (`--warnings-as-errors`).
 - **Streams decision**: `DesktopLive` collections are small and bounded (servers, files, procs, containers), so plain assigns are used deliberately (documented in its moduledoc). Do not "migrate to streams" without cause.
 - **HEEx gotchas proven in this repo**:
-  - Inside `phx-no-curly-interpolation`, only `@assigns` interpolate — function calls must use `<%= ... %>`.
+  - Inside `phx-no-curly-interpolation`, NOTHING in `{...}` interpolates (not even `@assigns` — verified: systemd journal and nginx test output rendered literally for months). All dynamic values there must use `<%= ... %>`.
   - Never nest `<form>` elements; merge into one form whose single `phx-change` reads all fields.
   - The `hidden` attribute loses to Tailwind's `.flex`; hide overlays with inline `style="display: none;"` driven from JS.
   - Never set `layout: {Layouts, :root}` on a `live_session` — it nests the root layout twice (duplicate IDs).
