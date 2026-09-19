@@ -3919,151 +3919,231 @@ defmodule MarsadWeb.DesktopLive do
 
   defp settings_app(assigns) do
     ~H"""
-    <div id="settings-appearance" class="marsad-scroll max-h-[480px] space-y-5 overflow-y-auto p-5">
-      <div>
-        <h3 class="flex items-center gap-2 font-bold">
-          <span class="acc-soft flex size-7 items-center justify-center rounded-lg">
-            <.icon name="hero-paint-brush" class="size-4" />
-          </span>
-          Appearance
-        </h3>
-        <p class="mt-0.5 text-xs text-base-content/60">
-          Theme and accent apply instantly and are stored in the database.
-        </p>
+    <div id="settings-appearance" class="flex h-full min-h-0 flex-col overflow-hidden">
+      <%!-- Header --%>
+      <div class="flex items-center gap-3 border-b border-base-content/10 bg-base-100 px-4 py-3">
+        <.icon name="hero-cog-6-tooth" class="size-5 text-base-content/70" />
+        <div class="min-w-0">
+          <h3 class="text-sm font-bold leading-tight">Settings</h3>
+          <p class="text-[11px] text-base-content/50">Theme · workspace · security</p>
+        </div>
+        <span class="ml-auto hidden items-center gap-1.5 rounded border border-base-content/10 bg-base-200 px-2 py-0.5 font-mono text-[11px] text-base-content/60 sm:flex">
+          {@current_admin && @current_admin.username}
+        </span>
       </div>
 
-      <section aria-label="Theme mode">
-        <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-base-content/60">Theme</p>
-        <div
-          class="grid grid-cols-2 gap-2 rounded-2xl border border-base-content/10 bg-base-content/[0.03] p-1.5"
-          role="group"
-        >
-          <button
-            id="theme-light"
-            phx-click="set-theme-mode"
-            phx-value-mode="light"
-            aria-pressed={@appearance.mode == "light"}
-            class={[
-              "flex cursor-pointer items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-150",
-              @appearance.mode == "light" && "acc-bg shadow",
-              @appearance.mode != "light" && "text-base-content/70 hover:bg-base-content/10"
-            ]}
-          >
-            <.icon name="hero-sun" class="size-4" /> Light
-          </button>
-          <button
-            id="theme-dark"
-            phx-click="set-theme-mode"
-            phx-value-mode="dark"
-            aria-pressed={@appearance.mode == "dark"}
-            class={[
-              "flex cursor-pointer items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-150",
-              @appearance.mode == "dark" && "acc-bg shadow",
-              @appearance.mode != "dark" && "text-base-content/70 hover:bg-base-content/10"
-            ]}
-          >
-            <.icon name="hero-moon" class="size-4" /> Dark
-          </button>
-        </div>
-      </section>
-
-      <section aria-label="Accent color">
-        <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-base-content/60">Accent</p>
-        <div class="grid grid-cols-3 gap-2">
-          <button
-            :for={{key, meta} <- Settings.accents()}
-            id={"accent-#{key}"}
-            phx-click="set-accent"
-            phx-value-accent={key}
-            aria-pressed={@appearance.accent == key}
-            title={meta.name}
-            class={[
-              "flex cursor-pointer flex-col items-center gap-1.5 rounded-2xl border p-3 transition-all duration-150 hover:shadow-md",
-              (@appearance.accent == key && "acc-border border-2 bg-base-content/[0.04]") ||
-                "border-base-content/10 hover:border-base-content/25"
-            ]}
-          >
-            <span
-              class="flex size-8 items-center justify-center rounded-full shadow-inner"
-              style={"background-color: #{meta.hex}; color: #{meta.ink}"}
-            >
-              <.icon :if={@appearance.accent == key} name="hero-check" class="size-4" />
+      <div class="marsad-scroll flex-1 space-y-3 overflow-y-auto p-4">
+        <%!-- Appearance --%>
+        <section class="rounded-lg border border-base-content/10 bg-base-100 p-4">
+          <header class="mb-3 flex items-center gap-2">
+            <.icon name="hero-paint-brush" class="size-4 text-base-content/60" />
+            <h4 class="text-sm font-bold">Appearance</h4>
+            <span class="ml-auto flex items-center gap-1.5 font-mono text-[11px] text-base-content/50">
+              <span class="size-2 rounded-full" style={"background: #{@appearance.hex}"}></span>
+              {@appearance.accent} · {@appearance.mode}
             </span>
-            <span class="text-xs font-medium">{meta.name}</span>
-          </button>
-        </div>
-      </section>
+          </header>
 
-      <section aria-label="Security" class="rounded-2xl border border-base-content/10 p-4">
-        <h4 class="flex items-center gap-2 text-sm font-bold">
-          <span class="acc-soft flex size-6 items-center justify-center rounded-lg">
-            <.icon name="hero-lock-closed" class="size-3.5" />
-          </span>
-          Security
-        </h4>
-        <p class="mt-1 text-xs text-base-content/60">
-          Signed in as <span class="font-mono font-semibold">{@current_admin && @current_admin.username}</span>.
-          Change the admin password here. Reset deletes the admin so first-time setup runs again.
-        </p>
+          <div class="space-y-4">
+            <%!-- Theme mode --%>
+            <div>
+              <p class="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-base-content/40">
+                Theme
+              </p>
+              <div
+                class="inline-flex rounded-md border border-base-content/10 bg-base-200/50 p-0.5"
+                role="group"
+                aria-label="Theme"
+              >
+                <button
+                  id="theme-light"
+                  type="button"
+                  phx-click="set-theme-mode"
+                  phx-value-mode="light"
+                  aria-pressed={to_string(@appearance.mode == "light")}
+                  class={[
+                    "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors",
+                    @appearance.mode == "light" && "acc-bg shadow-sm",
+                    @appearance.mode != "light" &&
+                      "text-base-content/60 hover:bg-base-100 hover:text-base-content"
+                  ]}
+                >
+                  <.icon name="hero-sun" class="size-3.5" /> Light
+                </button>
+                <button
+                  id="theme-dark"
+                  type="button"
+                  phx-click="set-theme-mode"
+                  phx-value-mode="dark"
+                  aria-pressed={to_string(@appearance.mode == "dark")}
+                  class={[
+                    "flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors",
+                    @appearance.mode == "dark" && "acc-bg shadow-sm",
+                    @appearance.mode != "dark" &&
+                      "text-base-content/60 hover:bg-base-100 hover:text-base-content"
+                  ]}
+                >
+                  <.icon name="hero-moon" class="size-3.5" /> Dark
+                </button>
+              </div>
+            </div>
 
-        <.form
-          for={@password_form}
-          id="password-form"
-          phx-submit="change-password"
-          class="mt-3 space-y-2"
-        >
-          <.input
-            field={@password_form[:password]}
-            type="password"
-            label="New password (min 8)"
-            autocomplete="new-password"
-          />
-          <.input
-            field={@password_form[:confirm]}
-            type="password"
-            label="Confirm new password"
-            autocomplete="new-password"
-          />
-          <p
-            :if={@password_msg}
-            id="password-msg"
-            role="status"
-            class={[
-              "text-xs font-medium",
-              match?({:ok, _}, @password_msg) && "text-emerald-600",
-              match?({:error, _}, @password_msg) && "text-red-500"
-            ]}
-          >
-            {elem(@password_msg, 1)}
-          </p>
-          <div class="flex flex-wrap gap-2">
-            <button type="submit" id="password-submit" class="btn btn-sm acc-bg border-0">
-              Update password
-            </button>
-            <button
-              type="button"
-              id="auth-reset"
-              phx-click="reset-auth"
-              data-confirm="Delete the admin account and go back to setup? You will be signed out."
-              class="btn btn-sm btn-ghost border border-red-500/30 text-red-500"
-            >
-              Reset auth
-            </button>
-            <a
-              href="/logout"
-              id="logout-link"
-              class="btn btn-sm btn-ghost border border-base-content/15"
-            >
-              Sign out
-            </a>
+            <%!-- Accent --%>
+            <div>
+              <p class="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-base-content/40">
+                Accent
+              </p>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  :for={{key, meta} <- Settings.accents()}
+                  id={"accent-#{key}"}
+                  type="button"
+                  phx-click="set-accent"
+                  phx-value-accent={key}
+                  aria-pressed={to_string(@appearance.accent == key)}
+                  title={meta.name}
+                  class={[
+                    "flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition-colors",
+                    @appearance.accent == key && "acc-border border-2 bg-base-content/[0.04]",
+                    @appearance.accent != key &&
+                      "border-base-content/10 bg-base-100 hover:border-base-content/20"
+                  ]}
+                >
+                  <span
+                    class="size-4 rounded-full ring-1 ring-black/10"
+                    style={"background-color: #{meta.hex}; color: #{meta.ink}"}
+                  >
+                    <.icon :if={@appearance.accent == key} name="hero-check" class="size-3" />
+                  </span>
+                  <span class="font-medium">{meta.name}</span>
+                </button>
+              </div>
+            </div>
           </div>
-        </.form>
-      </section>
+        </section>
 
-      <p class="flex items-center gap-1.5 rounded-xl bg-base-content/[0.04] p-3 text-[11px] leading-relaxed text-base-content/60">
-        <.icon name="hero-information-circle" class="size-4 shrink-0" />
-        More sections (SSH defaults, notifications) will live here as the OS grows.
-      </p>
+        <%!-- Workspace --%>
+        <section class="rounded-lg border border-base-content/10 bg-base-100 p-4">
+          <header class="mb-3 flex items-center gap-2">
+            <.icon name="hero-adjustments-horizontal" class="size-4 text-base-content/60" />
+            <h4 class="text-sm font-bold">Workspace</h4>
+          </header>
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-xs font-medium">Monitor polling interval</p>
+              <p class="text-[11px] text-base-content/50">
+                How often the Monitor tab refreshes. Min 5s.
+              </p>
+            </div>
+            <form phx-change="metrics_interval" class="shrink-0">
+              <select
+                name="interval"
+                aria-label="Metrics interval"
+                class="select select-sm select-bordered h-8 min-h-0 rounded-md bg-base-100 text-xs"
+              >
+                <option value="5" selected={Settings.metrics_interval() == 5000}>5s</option>
+                <option value="10" selected={Settings.metrics_interval() == 10000}>10s</option>
+                <option value="15" selected={Settings.metrics_interval() == 15000}>15s</option>
+                <option value="30" selected={Settings.metrics_interval() == 30000}>30s</option>
+                <option value="60" selected={Settings.metrics_interval() == 60000}>60s</option>
+              </select>
+            </form>
+          </div>
+        </section>
+
+        <%!-- Security --%>
+        <section class="rounded-lg border border-base-content/10 bg-base-100 p-4">
+          <header class="mb-3 flex items-center gap-2">
+            <.icon name="hero-shield-check" class="size-4 text-base-content/60" />
+            <h4 class="text-sm font-bold">Security</h4>
+            <span class="ml-auto flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+              <span class="size-1.5 rounded-full bg-emerald-500"></span> Active
+            </span>
+          </header>
+
+          <.form
+            for={@password_form}
+            id="password-form"
+            phx-submit="change-password"
+            class="space-y-3"
+          >
+            <div class="grid gap-3 sm:grid-cols-2">
+              <.input
+                field={@password_form[:password]}
+                type="password"
+                label="New password"
+                placeholder="••••••••"
+                autocomplete="new-password"
+              />
+              <.input
+                field={@password_form[:confirm]}
+                type="password"
+                label="Confirm"
+                placeholder="••••••••"
+                autocomplete="new-password"
+              />
+            </div>
+            <p class="text-[11px] text-base-content/50">Minimum 8 characters. Stored locally.</p>
+            <p
+              :if={@password_msg}
+              id="password-msg"
+              role="status"
+              class={[
+                "flex items-center gap-1.5 rounded px-2 py-1.5 text-xs font-medium",
+                match?({:ok, _}, @password_msg) &&
+                  "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                match?({:error, _}, @password_msg) && "bg-red-500/10 text-red-700 dark:text-red-300"
+              ]}
+            >
+              <.icon
+                name={
+                  if match?({:ok, _}, @password_msg),
+                    do: "hero-check-circle",
+                    else: "hero-exclamation-triangle"
+                }
+                class="size-3.5"
+              />
+              {elem(@password_msg, 1)}
+            </p>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="submit"
+                id="password-submit"
+                class="btn btn-sm acc-bg border-0 gap-1 shadow-sm"
+              >
+                <.icon name="hero-key" class="size-3.5" /> Update
+              </button>
+              <button
+                type="button"
+                id="auth-reset"
+                phx-click="reset-auth"
+                data-confirm="Delete the admin account and go back to setup? You will be signed out."
+                class="btn btn-sm btn-ghost gap-1 text-red-600 hover:bg-red-500/10 dark:text-red-400"
+              >
+                <.icon name="hero-trash" class="size-3.5" /> Reset auth
+              </button>
+              <a
+                href="/logout"
+                id="logout-link"
+                class="btn btn-sm btn-ghost gap-1"
+              >
+                <.icon name="hero-arrow-right-start-on-rectangle" class="size-3.5" /> Sign out
+              </a>
+            </div>
+          </.form>
+        </section>
+
+        <%!-- About --%>
+        <section class="rounded-lg border border-dashed border-base-content/10 bg-base-content/[0.02] p-3">
+          <div class="flex flex-wrap items-center gap-2 text-[11px] text-base-content/50">
+            <span class="font-medium text-base-content/70">Marsad OS</span>
+            <span class="font-mono">v0.1 · Phoenix 1.8 · SQLite</span>
+            <span class="ml-auto flex items-center gap-1">
+              <span class="size-1.5 rounded-full bg-emerald-500"></span> Ready
+            </span>
+          </div>
+        </section>
+      </div>
     </div>
     """
   end
