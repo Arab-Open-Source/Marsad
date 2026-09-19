@@ -439,25 +439,120 @@ defmodule Marsad.Fleet.Services do
 
   # -- systemd ----------------------------------------------------------------
 
-  @doc "Lists all service units."
+  @systemd_types ~w(service timer socket)
+  @systemd_actions ~w(start stop restart reload enable disable mask unmask reset-failed)
+  @systemd_log_tails [50, 100, 200, 500, 1000]
+  @systemd_log_priorities ~w(emerg alert crit err warning notice info debug)
+
+  @doc "Unit types offered by the UI."
+  def systemd_unit_types, do: @systemd_types
+
+  @doc "Supported unit actions (unknown actions are rejected, never crash)."
+  def systemd_actions, do: @systemd_actions
+
+  @doc "Journal tail sizes offered by the UI."
+  def systemd_log_tails, do: @systemd_log_tails
+
+  @doc "Journal priority levels offered by the UI."
+  def systemd_log_priorities, do: @systemd_log_priorities
+
+  @doc "Lists units of one type (default `service`). Unknown types are rejected."
   @spec systemd_units(pos_integer()) :: {:ok, [unit()]} | {:error, term()}
-  def systemd_units(server_id) do
-    case Fleet.exec(server_id, "systemctl list-units --type=service --all --no-legend --no-pager") do
+  def systemd_units(server_id), do: systemd_units(server_id, "service")
+
+  @spec systemd_units(pos_integer(), binary()) :: {:ok, [unit()]} | {:error, term()}
+  def systemd_units(server_id, type) when type in @systemd_types do
+    case Fleet.exec(
+           server_id,
+           "systemctl list-units --type=#{type} --all --no-legend --no-pager"
+         ) do
       {:ok, %{stdout: out, status: 0}} -> {:ok, parse_systemctl(out)}
       {:ok, %{stderr: err}} -> {:error, {:systemctl_failed, String.trim(err)}}
       {:error, _} = error -> error
     end
   end
 
-  @doc "Starts/stops/restarts one unit."
+  def systemd_units(_server_id, _type), do: {:error, :invalid_type}
+
+  @doc "Runs one unit action (`start`/`stop`/`restart`/`reload`/`enable`/...). Unknown actions are rejected, never crash."
   @spec systemd_action(pos_integer(), binary(), binary()) :: {:ok, binary()} | {:error, term()}
-  def systemd_action(server_id, action, unit) when action in ["start", "stop", "restart"] do
+  def systemd_action(server_id, action, unit) when action in @systemd_actions do
     with :ok <- validate_name(unit),
          {:ok, %{stdout: out, stderr: err, status: status}} <-
            Fleet.exec(server_id, "systemctl #{action} #{unit}") do
       if status == 0,
         do: {:ok, String.trim(out <> err)},
         else: {:error, {:action_failed, String.trim(out <> err)}}
+    end
+  end
+
+  def systemd_action(_server_id, _action, _unit), do: {:error, :invalid_action}
+
+  @doc "English past tense for unit actions (for flash messages)."
+  @spec systemd_action_past(binary()) :: binary()
+  def systemd_action_past("start"), do: "started"
+  def systemd_action_past("stop"), do: "stopped"
+  def systemd_action_past("restart"), do: "restarted"
+  def systemd_action_past("reload"), do: "reloaded"
+  def systemd_action_past("enable"), do: "enabled"
+  def systemd_action_past("disable"), do: "disabled"
+  def systemd_action_past("mask"), do: "masked"
+  def systemd_action_past("unmask"), do: "unmasked"
+  def systemd_action_past("reset-failed"), do: "reset"
+  def systemd_action_past(action), do: "#{action}ed"
+
+  @doc "Reloads the systemd manager configuration."
+  @spec systemd_daemon_reload(pos_integer()) :: {:ok, binary()} | {:error, term()}
+  def systemd_daemon_reload(server_id) do
+    case Fleet.exec(server_id, "systemctl daemon-reload 2>&1") do
+      {:ok, %{stdout: out, stderr: err, status: 0}} -> {:ok, String.trim(out <> err)}
+      {:ok, %{stdout: out, stderr: err}} -> {:error, {:reload_failed, String.trim(out <> err)}}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc "Resets all failed units (`systemctl reset-failed` without arguments)."
+  @spec systemd_reset_failed(pos_integer()) :: {:ok, binary()} | {:error, term()}
+  def systemd_reset_failed(server_id) do
+    case Fleet.exec(server_id, "systemctl reset-failed 2>&1") do
+      {:ok, %{stdout: out, stderr: err, status: 0}} ->
+        {:ok, String.trim(out <> err)}
+
+      {:ok, %{stdout: out, stderr: err}} ->
+        {:error, {:reset_failed_failed, String.trim(out <> err)}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc "Resolves a unit's fragment path via `systemctl show` (validated, never interpolates raw input)."
+  @spec systemd_fragment_path(pos_integer(), binary()) :: {:ok, binary()} | {:error, term()}
+  def systemd_fragment_path(server_id, unit) do
+    with :ok <- validate_name(unit),
+         {:ok, %{stdout: out}} <-
+           Fleet.exec(server_id, "systemctl show #{unit} -p FragmentPath 2>&1 | cut -d= -f2") do
+      path =
+        out |> String.trim() |> String.split("\n", trim: true) |> List.first("") |> String.trim()
+
+      if path == "" or path == "n/a" or String.contains?(path, "not-found") do
+        {:error, :not_found}
+      else
+        {:ok, path}
+      end
+    end
+  end
+
+  @doc "Fetches live `systemctl show` properties for one unit."
+  @spec systemd_status(pos_integer(), binary()) :: {:ok, map()} | {:error, term()}
+  def systemd_status(server_id, unit) do
+    with :ok <- validate_name(unit),
+         {:ok, %{stdout: out}} <-
+           Fleet.exec(
+             server_id,
+             "systemctl show #{unit} -p Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,MemoryCurrent,CPUUsageNSec,ActiveEnterTimestamp,ExecMainStatus,NRestarts 2>&1"
+           ) do
+      {:ok, parse_systemctl_show(out)}
     end
   end
 
@@ -480,42 +575,139 @@ defmodule Marsad.Fleet.Services do
     end
   end
 
-  @doc "Tails a unit's journal."
+  @doc """
+  Tails a unit's journal (stdout + stderr merged), capped at 200KB.
+
+  Options: `tail:` (one of 50/100/200/500/1000, default 200),
+  `priority:` (one of emerg/alert/crit/err/warning/notice/info/debug, default nil).
+  Forged values fall back to defaults instead of crashing.
+  """
   @spec systemd_logs(pos_integer(), binary()) :: {:ok, binary()} | {:error, term()}
-  def systemd_logs(server_id, unit) do
+  def systemd_logs(server_id, unit), do: systemd_logs(server_id, unit, [])
+
+  @spec systemd_logs(pos_integer(), binary(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def systemd_logs(server_id, unit, opts) do
+    tail = Keyword.get(opts, :tail, 200)
+    tail = if tail in @systemd_log_tails, do: tail, else: 200
+
+    priority = Keyword.get(opts, :priority)
+    priority = if priority in @systemd_log_priorities, do: priority, else: nil
+
+    prio_flag = if priority, do: " -p #{priority}", else: ""
+
     with :ok <- validate_name(unit),
          {:ok, %{stdout: out, stderr: err}} <-
-           Fleet.exec(server_id, "journalctl -u #{unit} -n 200 --no-pager 2>&1") do
+           Fleet.exec(
+             server_id,
+             "journalctl -u #{unit}#{prio_flag} -n #{tail} --no-pager 2>&1 | head -c 200000"
+           ) do
       {:ok, out <> err}
     end
   end
 
-  @doc "Fetches a unit's definition file via `systemctl cat`."
-  @spec systemd_unit_file(pos_integer(), binary()) :: {:ok, binary()} | {:error, term()}
+  @doc """
+  Full journal download (newest bytes win): streams `journalctl` through
+  `tail -c` so the transfer never exceeds #{div(@max_log_download, 1_000_000)}MB.
+  Binary-safe. Respects `priority:` when given.
+  """
+  @spec systemd_logs_download(pos_integer(), binary(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def systemd_logs_download(server_id, unit, opts \\ []) do
+    priority = Keyword.get(opts, :priority)
+    priority = if priority in @systemd_log_priorities, do: priority, else: nil
+    prio_flag = if priority, do: " -p #{priority}", else: ""
+
+    with :ok <- validate_name(unit),
+         {:ok, %{stdout: out, stderr: err}} <-
+           Fleet.exec(
+             server_id,
+             "journalctl -u #{unit}#{prio_flag} --no-pager 2>&1 | tail -c #{@max_log_download}"
+           ) do
+      {:ok, out <> err}
+    end
+  end
+
+  @systemd_root "/etc/systemd/system"
+
+  @doc "Confines a systemd unit path under #{@systemd_root}. Pure — unit tested."
+  @spec systemd_unit_path(binary()) :: {:ok, binary()} | {:error, term()}
+  def systemd_unit_path(name) when is_binary(name) do
+    with :ok <- validate_name(name),
+         true <- String.contains?(name, ".") do
+      clean = Fleet.remote_join(@systemd_root, name)
+
+      if clean == @systemd_root or String.starts_with?(clean, @systemd_root <> "/") do
+        {:ok, clean}
+      else
+        {:error, :outside_systemd_root}
+      end
+    else
+      {:error, :invalid_name} = err -> err
+      false -> {:error, :invalid_name}
+    end
+  end
+
+  def systemd_unit_path(_), do: {:error, :invalid_name}
+
+  @doc "Creates a new unit file under #{@systemd_root} and reloads the daemon. The name must be a valid unit name (e.g. `myapp.service`)."
+  @spec systemd_create_unit(pos_integer(), binary(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def systemd_create_unit(server_id, name, content) when is_binary(content) do
+    with {:ok, path} <- systemd_unit_path(name),
+         :ok <- validate_unit_content(content),
+         :ok <- write_result(Fleet.write_file(server_id, path, content)),
+         {:ok, _} <- systemd_daemon_reload(server_id) do
+      {:ok, path}
+    end
+  end
+
+  def systemd_create_unit(_server_id, _name, _content), do: {:error, :invalid_content}
+
+  defp validate_unit_content(content) do
+    cond do
+      not is_binary(content) -> {:error, :invalid_content}
+      byte_size(content) == 0 -> {:error, :empty_content}
+      byte_size(content) > 200_000 -> {:error, :too_large}
+      true -> :ok
+    end
+  end
+
+  defp write_result(:ok), do: :ok
+  defp write_result({:ok, _} = ok), do: ok |> elem(0) |> then(fn _ -> :ok end)
+  defp write_result({:error, _} = err), do: err
+  defp write_result(other), do: {:error, other}
+
+  @doc """
+  Fetches a unit's definition file via `systemctl cat` plus its fragment
+  path in one call, so callers never run a second (unvalidated) SSH lookup.
+  Returns `%{text:, path:}`.
+  """
+  @spec systemd_unit_file(pos_integer(), binary()) ::
+          {:ok, %{text: binary(), path: binary()}} | {:error, term()}
   def systemd_unit_file(server_id, unit) do
     with :ok <- validate_name(unit),
          {:ok, %{stdout: out, stderr: err}} <- Fleet.exec(server_id, "systemctl cat #{unit} 2>&1") do
       combined = String.trim(out <> err)
 
       if combined == "" or String.contains?(combined, "No files found") do
-        case Fleet.exec(server_id, "systemctl show #{unit} -p FragmentPath 2>&1 | cut -d= -f2") do
-          {:ok, %{stdout: frag}} ->
-            path = String.trim(frag)
-
-            if path != "" and path != "n/a" and not String.contains?(path, "not-found") do
-              case Fleet.read_file(server_id, String.trim(path), 100_000) do
-                {:ok, data} -> {:ok, data}
-                {:error, _} -> {:error, {:not_found, combined}}
-              end
-            else
-              {:error, {:not_found, combined}}
+        case systemd_fragment_path(server_id, unit) do
+          {:ok, path} ->
+            case Fleet.read_file(server_id, path, 100_000) do
+              {:ok, data} -> {:ok, %{text: data, path: path}}
+              {:error, _} -> {:error, {:not_found, combined}}
             end
 
-          _ ->
+          {:error, _} ->
             {:error, {:not_found, combined}}
         end
       else
-        {:ok, combined}
+        path =
+          case systemd_fragment_path(server_id, unit) do
+            {:ok, p} -> p
+            {:error, _} -> unit
+          end
+
+        {:ok, %{text: combined, path: path}}
       end
     end
   end
@@ -535,6 +727,19 @@ defmodule Marsad.Fleet.Services do
 
         _ ->
           []
+      end
+    end)
+  end
+
+  @doc "Parses `systemctl show` `Key=Value` output into a string map."
+  @spec parse_systemctl_show(binary()) :: %{optional(binary()) => binary()}
+  def parse_systemctl_show(out) do
+    out
+    |> String.split("\n", trim: true)
+    |> Enum.reduce(%{}, fn line, acc ->
+      case String.split(line, "=", parts: 2) do
+        [key, value] when key != "" -> Map.put(acc, String.trim(key), String.trim(value))
+        _ -> acc
       end
     end)
   end

@@ -510,8 +510,7 @@ defmodule MarsadWeb.DesktopLive do
         %{server_id: sid, unit_preview: %{path: ^path} = preview} = s ->
           case write_result(Fleet.write_file(sid, path, content)) do
             :ok ->
-              # Reload systemd daemon after saving unit
-              _ = Fleet.exec(sid, "systemctl daemon-reload 2>&1")
+              _ = Services.systemd_daemon_reload(sid)
               preview = %{preview | text: content, full_text: content, editing: false}
 
               socket
@@ -528,7 +527,7 @@ defmodule MarsadWeb.DesktopLive do
 
           case write_result(Fleet.write_file(sid, frag_path, content)) do
             :ok ->
-              _ = Fleet.exec(sid, "systemctl daemon-reload 2>&1")
+              _ = Services.systemd_daemon_reload(sid)
               preview = %{preview | text: content, full_text: content, editing: false}
 
               socket
@@ -1146,73 +1145,157 @@ defmodule MarsadWeb.DesktopLive do
   end
 
   def handle_event("systemd-server", %{"server_id" => id}, socket) do
-    {:noreply, load_systemd(socket, String.to_integer(id))}
+    case parse_systemd_sid(id) do
+      {:ok, sid} -> {:noreply, load_systemd(socket, sid)}
+      :error -> {:noreply, socket}
+    end
   end
 
+  def handle_event("systemd-server", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-type", %{"type" => type}, socket)
+      when type in ~w(service timer socket) do
+    socket = assign_systemd(socket, fn s -> %{s | unit_type: type} end)
+    {:noreply, reload_systemd_list(socket)}
+  end
+
+  def handle_event("systemd-type", _params, socket), do: {:noreply, socket}
+
   def handle_event("systemd-refresh", _params, socket) do
-    {:noreply, reload_systemd(socket)}
+    {:noreply, reload_systemd_list(socket)}
   end
 
   def handle_event("systemd-filter", %{"filter" => filter}, socket) do
     {:noreply, assign_systemd(socket, fn s -> %{s | filter: filter} end)}
   end
 
+  def handle_event("systemd-filter", _params, socket), do: {:noreply, socket}
+
   def handle_event("systemd-state", %{"state" => state}, socket)
       when state in ~w(all active failed inactive) do
     {:noreply, assign_systemd(socket, fn s -> %{s | state: state} end)}
   end
 
+  # Forged filter values never crash the LiveView.
+  def handle_event("systemd-state", _params, socket), do: {:noreply, socket}
+
   def handle_event("systemd-sort", %{"sort" => sort}, socket) when sort in ~w(name state) do
     {:noreply, assign_systemd(socket, fn s -> %{s | sort: sort} end)}
   end
+
+  def handle_event("systemd-sort", _params, socket), do: {:noreply, socket}
 
   def handle_event("systemd-clear-filter", _params, socket) do
     {:noreply, assign_systemd(socket, fn s -> %{s | filter: ""} end)}
   end
 
-  def handle_event("systemd-action", %{"action" => action, "name" => name}, socket) do
-    socket =
-      case socket.assigns.systemd do
-        %{server_id: sid} ->
-          case Services.systemd_action(sid, action, name) do
-            {:ok, _} ->
-              socket |> put_flash(:info, "Unit #{action}ed.") |> reload_systemd()
+  def handle_event(
+        "systemd-action",
+        %{"action" => action, "name" => name},
+        socket
+      )
+      when action in ~w(start stop restart reload enable disable mask unmask reset-failed) do
+    case socket.assigns.systemd do
+      %{server_id: sid, busy: nil} = s ->
+        ref = make_ref()
+        lv = self()
 
-            {:error, reason} ->
-              put_flash(socket, :error, "systemctl #{action} failed: #{inspect(reason)}")
-          end
+        Task.start(fn ->
+          result =
+            if action == "reset-failed" and name == "*" do
+              Services.systemd_reset_failed(sid)
+            else
+              Services.systemd_action(sid, action, name)
+            end
 
-        _ ->
-          socket
-      end
+          send(lv, {:systemd_action_done, ref, sid, action, name, result})
+        end)
 
-    {:noreply, socket}
+        {:noreply,
+         assign(socket, :systemd, %{
+           s
+           | busy: %{action: action, name: name},
+             action_ref: ref
+         })}
+
+      %{busy: %{}} ->
+        {:noreply, put_flash(socket, :info, "Another unit action is still running…")}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # Forged/unknown actions never crash the LiveView.
+  def handle_event("systemd-action", %{"action" => action}, socket) do
+    {:noreply, put_flash(socket, :error, "Unknown systemd action: #{action}")}
+  end
+
+  def handle_event("systemd-action", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-daemon-reload", _params, socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid, busy: nil} = s ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:systemd_reload_done, ref, sid, Services.systemd_daemon_reload(sid)})
+        end)
+
+        {:noreply,
+         assign(socket, :systemd, %{
+           s
+           | busy: %{action: "daemon-reload", name: ""},
+             action_ref: ref
+         })}
+
+      %{busy: %{}} ->
+        {:noreply, put_flash(socket, :info, "Another unit action is still running…")}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   def handle_event("systemd-logs", %{"name" => name}, socket) do
-    socket =
-      case socket.assigns.systemd do
-        %{server_id: sid} = s ->
-          case Services.systemd_logs(sid, name) do
-            {:ok, text} ->
-              assign(socket, :systemd, %{
-                s
-                | logs: %{name: name, text: text, collapsed: false, wrap: false}
-              })
+    case socket.assigns.systemd do
+      %{server_id: sid} = s ->
+        {:noreply, fetch_systemd_logs(socket, sid, name, systemd_log_opts(s))}
 
-            {:error, reason} ->
-              put_flash(socket, :error, "Journal failed: #{inspect(reason)}")
-          end
-
-        _ ->
-          socket
-      end
-
-    {:noreply, socket}
+      _ ->
+        {:noreply, socket}
+    end
   end
 
+  def handle_event("systemd-logs", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-logs-tail", %{"tail" => tail}, socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid, logs: %{name: name}} = s ->
+        {:noreply, fetch_systemd_logs(socket, sid, name, systemd_log_opts(s, tail: tail))}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("systemd-logs-tail", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-logs-priority", %{"priority" => priority}, socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid, logs: %{name: name}} = s ->
+        {:noreply, fetch_systemd_logs(socket, sid, name, systemd_log_opts(s, priority: priority))}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("systemd-logs-priority", _params, socket), do: {:noreply, socket}
+
   def handle_event("systemd-close-logs", _params, socket) do
-    {:noreply, assign_systemd(socket, fn s -> %{s | logs: nil} end)}
+    {:noreply, assign_systemd(socket, fn s -> %{s | logs: nil, logs_ref: nil} end)}
   end
 
   def handle_event("systemd-logs-collapse", _params, socket) do
@@ -1234,47 +1317,123 @@ defmodule MarsadWeb.DesktopLive do
      end)}
   end
 
-  def handle_event("systemd-unit-preview", %{"name" => name}, socket) do
+  def handle_event("systemd-logs-filter", %{"filter" => filter}, socket) do
+    {:noreply,
+     assign_systemd(socket, fn
+       %{logs: %{} = logs} = s -> %{s | logs: %{logs | filter: filter}}
+       s -> s
+     end)}
+  end
+
+  def handle_event("systemd-logs-filter", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-detail", %{"name" => name}, socket) do
     case socket.assigns.systemd do
-      %{server_id: sid} = s ->
-        case Marsad.Fleet.Services.systemd_unit_file(sid, name) do
-          {:ok, data} ->
-            frag_path =
-              case Marsad.Fleet.exec(
-                     sid,
-                     "systemctl show #{name} -p FragmentPath 2>&1 | cut -d= -f2"
-                   ) do
-                {:ok, %{stdout: out}} -> String.trim(out)
-                _ -> name
-              end
-
-            frag_path = if frag_path == "" or frag_path == "n/a", do: name, else: frag_path
-
-            preview = %{
-              name: name,
-              path: frag_path,
-              text: data,
-              full_text: data,
-              language: code_language(name),
-              editing: false,
-              fragment_path: frag_path,
-              truncated?: false
-            }
-
-            {:noreply, assign(socket, :systemd, %{s | unit_preview: preview})}
-
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, "Unit file not found: #{inspect(reason)}")}
+      %{detail: detail} when is_map(detail) ->
+        if Map.get(detail, "Id") == name do
+          {:noreply, assign_systemd(socket, fn s -> %{s | detail: nil, detail_ref: nil} end)}
+        else
+          case socket.assigns.systemd do
+            %{server_id: sid} -> {:noreply, fetch_systemd_detail(socket, sid, name)}
+            _ -> {:noreply, socket}
+          end
         end
+
+      %{server_id: sid} ->
+        {:noreply, fetch_systemd_detail(socket, sid, name)}
 
       _ ->
         {:noreply, socket}
     end
   end
 
-  def handle_event("systemd-unit-close", _params, socket) do
-    {:noreply, assign_systemd(socket, fn s -> %{s | unit_preview: nil} end)}
+  def handle_event("systemd-detail", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-close-detail", _params, socket) do
+    {:noreply, assign_systemd(socket, fn s -> %{s | detail: nil, detail_ref: nil} end)}
   end
+
+  def handle_event("systemd-unit-preview", %{"name" => name}, socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid} ->
+        {:noreply, fetch_systemd_unit(socket, sid, name)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("systemd-unit-preview", _params, socket), do: {:noreply, socket}
+
+  def handle_event("systemd-unit-close", _params, socket) do
+    {:noreply, assign_systemd(socket, fn s -> %{s | unit_preview: nil, preview_ref: nil} end)}
+  end
+
+  def handle_event("systemd-auto-refresh", _params, socket) do
+    socket =
+      assign_systemd(socket, fn s ->
+        %{s | auto_refresh: !Map.get(s, :auto_refresh, false)}
+      end)
+
+    if socket.assigns.systemd && socket.assigns.systemd.auto_refresh do
+      Process.send_after(self(), :systemd_tick, 15_000)
+    end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("systemd-show-create", _params, socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid} = s when not is_nil(sid) ->
+        template = systemd_unit_template("myapp.service")
+
+        {:noreply,
+         assign(socket, :systemd, %{
+           s
+           | create: %{name: "", content: template, error: nil},
+             create_ref: nil
+         })}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("systemd-hide-create", _params, socket) do
+    {:noreply, assign_systemd(socket, fn s -> %{s | create: nil, create_ref: nil} end)}
+  end
+
+  def handle_event("systemd-create", %{"name" => name, "content" => content}, socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid, busy: nil, create: %{} = _create} = s ->
+        trimmed = String.trim(to_string(name))
+        content = to_string(content)
+
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          result = Services.systemd_create_unit(sid, trimmed, content)
+          send(lv, {:systemd_create_done, ref, sid, trimmed, result})
+        end)
+
+        {:noreply,
+         assign(socket, :systemd, %{
+           s
+           | busy: %{action: "create", name: trimmed},
+             create_ref: ref,
+             create: %{s.create | error: nil}
+         })}
+
+      %{busy: %{}} ->
+        {:noreply, put_flash(socket, :info, "Another unit action is still running…")}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("systemd-create", _params, socket), do: {:noreply, socket}
 
   def handle_event("nginx-server", %{"server_id" => ""}, socket) do
     {:noreply, assign(socket, :nginx, nil)}
@@ -2287,6 +2446,215 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
+  def handle_info(:systemd_tick, socket) do
+    if socket.assigns.systemd && socket.assigns.systemd.auto_refresh do
+      {:noreply, socket |> reload_systemd_list() |> schedule_systemd_tick()}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_loaded, ref, sid, type, result}, socket) do
+    if systemd_ref?(socket, :data_ref, ref, sid) do
+      socket =
+        assign(socket, :systemd, %{
+          socket.assigns.systemd
+          | data: result,
+            data_ref: nil,
+            unit_type: type,
+            last_refreshed_at: DateTime.utc_now()
+        })
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_logs_done, ref, sid, name, opts, result}, socket) do
+    if systemd_ref?(socket, :logs_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, text} ->
+            assign(socket, :systemd, %{
+              socket.assigns.systemd
+              | logs: %{
+                  name: name,
+                  text: text,
+                  tail: Keyword.get(opts, :tail, 200),
+                  priority: Keyword.get(opts, :priority),
+                  filter: "",
+                  collapsed: false,
+                  wrap: false
+                },
+                logs_ref: nil
+            })
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Journal failed: #{inspect(reason)}")
+            |> assign_systemd(fn s -> %{s | logs: nil, logs_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_detail_done, ref, sid, _name, result}, socket) do
+    if systemd_ref?(socket, :detail_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, data} ->
+            assign(socket, :systemd, %{socket.assigns.systemd | detail: data, detail_ref: nil})
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Status failed: #{inspect(reason)}")
+            |> assign_systemd(fn s -> %{s | detail: nil, detail_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_unit_done, ref, sid, name, result}, socket) do
+    if systemd_ref?(socket, :preview_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, %{text: text, path: frag_path}} ->
+            preview = %{
+              name: name,
+              path: frag_path,
+              text: text,
+              full_text: text,
+              language: code_language(frag_path),
+              editing: false,
+              fragment_path: frag_path,
+              truncated?: false
+            }
+
+            assign(socket, :systemd, %{
+              socket.assigns.systemd
+              | unit_preview: preview,
+                preview_ref: nil
+            })
+
+          {:ok, text} when is_binary(text) ->
+            # Backwards compat: old shape returned raw string.
+            preview = %{
+              name: name,
+              path: name,
+              text: text,
+              full_text: text,
+              language: code_language(name),
+              editing: false,
+              fragment_path: name,
+              truncated?: false
+            }
+
+            assign(socket, :systemd, %{
+              socket.assigns.systemd
+              | unit_preview: preview,
+                preview_ref: nil
+            })
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "Unit file not found: #{inspect(reason)}")
+            |> assign_systemd(fn s -> %{s | unit_preview: nil, preview_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_action_done, ref, sid, action, name, result}, socket) do
+    if systemd_ref?(socket, :action_ref, ref, sid) do
+      past = Services.systemd_action_past(action)
+
+      socket =
+        case result do
+          {:ok, _} ->
+            Services.audit(sid, "systemd_#{action}", name, "ok")
+
+            socket
+            |> put_flash(:info, "Unit #{past}.")
+            |> assign_systemd(fn s -> %{s | busy: nil, action_ref: nil} end)
+            |> reload_systemd_list()
+
+          {:error, reason} ->
+            Services.audit(sid, "systemd_#{action}", name, "failed: #{inspect(reason)}")
+
+            socket
+            |> put_flash(:error, "systemctl #{action} failed: #{inspect(reason)}")
+            |> assign_systemd(fn s -> %{s | busy: nil, action_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_reload_done, ref, sid, result}, socket) do
+    if systemd_ref?(socket, :action_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, _} ->
+            Services.audit(sid, "systemd_daemon_reload", "", "ok")
+
+            socket
+            |> put_flash(:info, "Daemon reloaded.")
+            |> assign_systemd(fn s -> %{s | busy: nil, action_ref: nil} end)
+            |> reload_systemd_list()
+
+          {:error, reason} ->
+            socket
+            |> put_flash(:error, "daemon-reload failed: #{inspect(reason)}")
+            |> assign_systemd(fn s -> %{s | busy: nil, action_ref: nil} end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:systemd_create_done, ref, sid, name, result}, socket) do
+    if systemd_ref?(socket, :create_ref, ref, sid) do
+      socket =
+        case result do
+          {:ok, path} ->
+            Services.audit(sid, "systemd_create", name, "ok: #{path}")
+
+            socket
+            |> put_flash(:info, "Unit created: #{name}")
+            |> assign_systemd(fn s -> %{s | busy: nil, create_ref: nil, create: nil} end)
+            |> reload_systemd_list()
+
+          {:error, reason} ->
+            Services.audit(sid, "systemd_create", name, "failed: #{inspect(reason)}")
+
+            socket
+            |> put_flash(:error, "Create failed: #{inspect(reason)}")
+            |> assign_systemd(fn s ->
+              create = Map.get(s, :create) || %{name: name, content: "", error: nil}
+              %{s | busy: nil, create_ref: nil, create: %{create | error: inspect(reason)}}
+            end)
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
   defp term_shell_state(shells, wid) do
     case Map.get(shells, wid) do
       %{pid: pid, open: true} when is_pid(pid) -> if Process.alive?(pid), do: :open, else: :dead
@@ -2578,37 +2946,175 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
-  defp load_systemd(socket, server_id) do
-    data =
-      case Services.systemd_units(server_id) do
-        {:ok, units} -> {:ok, units}
-        {:error, _} = error -> error
-      end
-
-    assign(socket, :systemd, %{
+  defp fresh_systemd_state(server_id) do
+    %{
       server_id: server_id,
-      data: data,
+      data: nil,
+      data_ref: nil,
       filter: "",
       state: "all",
       sort: "name",
+      unit_type: "service",
       logs: nil,
-      unit_preview: nil
-    })
+      logs_ref: nil,
+      log_tail: 200,
+      log_priority: nil,
+      detail: nil,
+      detail_ref: nil,
+      unit_preview: nil,
+      preview_ref: nil,
+      busy: nil,
+      action_ref: nil,
+      last_refreshed_at: nil,
+      auto_refresh: false,
+      create: nil,
+      create_ref: nil
+    }
   end
 
-  defp reload_systemd(
-         %{assigns: %{systemd: %{server_id: sid, filter: filter, state: state, sort: sort}}} =
-           socket
-       ) do
-    socket
-    |> load_systemd(sid)
-    |> assign_systemd(fn s -> %{s | filter: filter, state: state, sort: sort} end)
+  defp systemd_unit_template(name) do
+    desc =
+      name
+      |> String.replace(~r/\.(service|timer|socket|target)$/, "")
+      |> String.replace("-", " ")
+      |> String.trim()
+
+    desc = if desc == "", do: "My Service", else: desc
+
+    """
+    [Unit]
+    Description=#{desc}
+    After=network.target
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/bin/env #{desc}
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    """
+    |> String.trim_leading()
   end
 
-  defp reload_systemd(socket), do: socket
+  defp load_systemd(socket, server_id) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:systemd_loaded, ref, server_id, "service", Services.systemd_units(server_id)})
+    end)
+
+    assign(socket, :systemd, %{fresh_systemd_state(server_id) | data_ref: ref})
+  end
+
+  # Refreshes only the unit list, preserving filters, tabs and open panels.
+  defp reload_systemd_list(socket) do
+    case socket.assigns.systemd do
+      %{server_id: sid, unit_type: type} = s ->
+        type = if type in ~w(service timer socket), do: type, else: "service"
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:systemd_loaded, ref, sid, type, Services.systemd_units(sid, type)})
+        end)
+
+        assign(socket, :systemd, %{s | unit_type: type, data_ref: ref})
+
+      _ ->
+        socket
+    end
+  end
 
   defp assign_systemd(%{assigns: %{systemd: nil}} = socket, _fun), do: socket
   defp assign_systemd(socket, fun), do: assign(socket, :systemd, fun.(socket.assigns.systemd))
+
+  defp systemd_ref?(socket, field, ref, sid) do
+    case socket.assigns.systemd do
+      %{server_id: ^sid} = s -> Map.get(s, field) == ref
+      _ -> false
+    end
+  end
+
+  defp parse_systemd_sid(id) do
+    case Integer.parse(to_string(id)) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  defp systemd_log_opts(s, overrides \\ []) do
+    tail = Keyword.get(overrides, :tail, Map.get(s, :log_tail, 200))
+
+    tail =
+      case Integer.parse(to_string(tail)) do
+        {n, ""} when n in [50, 100, 200, 500, 1000] -> n
+        _ -> 200
+      end
+
+    priority = Keyword.get(overrides, :priority, Map.get(s, :log_priority))
+
+    priority =
+      if priority in ~w(emerg alert crit err warning notice info debug), do: priority, else: nil
+
+    [tail: tail, priority: priority]
+  end
+
+  defp fetch_systemd_logs(socket, sid, name, opts) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(
+        lv,
+        {:systemd_logs_done, ref, sid, name, opts, Services.systemd_logs(sid, name, opts)}
+      )
+    end)
+
+    assign(socket, :systemd, %{
+      socket.assigns.systemd
+      | logs: :loading,
+        logs_ref: ref,
+        log_tail: Keyword.get(opts, :tail, 200),
+        log_priority: Keyword.get(opts, :priority)
+    })
+  end
+
+  defp fetch_systemd_detail(socket, sid, name) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:systemd_detail_done, ref, sid, name, Services.systemd_status(sid, name)})
+    end)
+
+    assign(socket, :systemd, %{socket.assigns.systemd | detail: :loading, detail_ref: ref})
+  end
+
+  defp fetch_systemd_unit(socket, sid, name) do
+    ref = make_ref()
+    lv = self()
+
+    Task.start(fn ->
+      send(lv, {:systemd_unit_done, ref, sid, name, Services.systemd_unit_file(sid, name)})
+    end)
+
+    assign(socket, :systemd, %{
+      socket.assigns.systemd
+      | unit_preview: :loading,
+        preview_ref: ref
+    })
+  end
+
+  defp schedule_systemd_tick(socket) do
+    if socket.assigns.systemd && socket.assigns.systemd.auto_refresh do
+      Process.send_after(self(), :systemd_tick, 15_000)
+    end
+
+    socket
+  end
 
   defp ensure_nginx(%{assigns: %{nginx: %{}}} = socket), do: socket
 
@@ -3216,8 +3722,15 @@ defmodule MarsadWeb.DesktopLive do
                             filter: "",
                             state: "all",
                             sort: "name",
+                            unit_type: "service",
                             logs: nil,
-                            unit_preview: nil
+                            detail: nil,
+                            unit_preview: nil,
+                            busy: nil,
+                            auto_refresh: false,
+                            last_refreshed_at: nil,
+                            create: nil,
+                            create_ref: nil
                           }
                       }
                       appearance={@appearance}
