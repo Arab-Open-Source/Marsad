@@ -22,6 +22,7 @@ This is a web application written using the Phoenix web framework.
   - `Registry`/`DynamicSupervisor` are global (not sandboxed): stub setups must kill stale entries via `terminate_child`, wait for unregister, and retry `start_link` (see `start_stub` helpers). Same for `on_exit` cleanup.
   - SSH-backed flows use `FileSessionStub` (exec/sftp); PTY shell flows use `FakeShellTransport` via `config :marsad, :shell_transport` (test env only). Password hashing is cheap in test (`:pbkdf2_iterations` config).
   - `assert_push_event` matches the first pushed event — drain intermediate pushes (e.g. "connecting…") before asserting later ones.
+  - Never write to the test DB from `mix run` scripts (no sandbox there) — stray rows persist in `marsad_test.db` and break "empty DB" assumptions suite-wide. Debug via throwaway `*_test.exs` files (deleted afterwards) instead.
 - **Elixir gotcha**: `~s(...)` sigils do not nest inner parens — test data with parentheses must use another delimiter (e.g. `~s|...|`).
 - **Prod boot is strict**: missing `MARSAD_VAULT_KEY` raises at startup by design; never reintroduce a silent dev-key fallback in `runtime.exs`.
 

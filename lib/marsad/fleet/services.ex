@@ -946,6 +946,167 @@ defmodule Marsad.Fleet.Services do
 
   def parse_cert_date(_), do: :error
 
+  # -- Certificate renewal --------------------------------------------------------------
+
+  @type renew_result :: %{renewed?: boolean(), reloaded?: boolean(), output: binary()}
+
+  @doc """
+  Renews one domain's certificate via certbot, then reloads nginx.
+
+  Steps: locate the certbot lineage covering `domain`, run
+  `certbot renew --cert-name <lineage>` (never `--force`; a not-due cert
+  is reported honestly, not faked), and on success run
+  `nginx -t && systemctl reload nginx` so the new cert is served.
+
+  `on_step` receives `:locate | :renew | :reload` as the work progresses
+  (used for live progress UI). Never raises.
+  """
+  @spec cert_renew(pos_integer(), binary(), (atom() -> any())) ::
+          {:ok, renew_result()} | {:error, term()}
+  def cert_renew(server_id, domain, on_step \\ fn _step -> :ok end) do
+    with {:ok, lineages} <- certbot_lineages(server_id, on_step),
+         {:ok, lineage} <- find_lineage(lineages, domain),
+         {:ok, result} <- run_renew(server_id, lineage, on_step) do
+      {:ok, result}
+    end
+  rescue
+    _ -> {:error, :renew_failed}
+  catch
+    _, _ -> {:error, :renew_failed}
+  end
+
+  defp certbot_lineages(server_id, on_step) do
+    on_step.(:locate)
+
+    case Fleet.exec(server_id, "certbot certificates 2>&1") do
+      {:ok, %{stdout: out, stderr: err}} ->
+        combined = out <> err
+
+        cond do
+          String.contains?(combined, "command not found") or
+              String.contains?(combined, "certbot: not found") ->
+            {:error, :certbot_missing}
+
+          true ->
+            {:ok, parse_certbot_certificates(combined)}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp find_lineage(lineages, domain) do
+    want = String.downcase(String.trim(domain))
+
+    case Enum.find(lineages, fn l -> Enum.any?(l.domains, &(String.downcase(&1) == want)) end) do
+      %{name: name} ->
+        case validate_name(name) do
+          :ok -> {:ok, name}
+          _ -> {:error, :invalid_lineage}
+        end
+
+      nil ->
+        {:error, :no_lineage}
+    end
+  end
+
+  defp run_renew(server_id, lineage, on_step) do
+    on_step.(:renew)
+    quoted = Marsad.Helpers.Text.shell_quote(lineage)
+
+    with {:ok, %{stdout: out, stderr: err, status: status}} <-
+           Fleet.exec(server_id, "certbot renew --cert-name #{quoted} 2>&1") do
+      output = truncate_output(out <> err)
+
+      cond do
+        status not in [0, nil] ->
+          {:error, {:renew_failed, output}}
+
+        String.contains?(String.downcase(output), "not due for renewal") ->
+          {:ok, %{renewed?: false, reloaded?: false, output: output}}
+
+        String.contains?(String.downcase(output), "keeping the existing") ->
+          {:ok, %{renewed?: false, reloaded?: false, output: output}}
+
+        String.contains?(String.downcase(output), "congratulations") or
+            String.contains?(String.downcase(output), "success") ->
+          reload_after_renew(server_id, output, on_step)
+
+        true ->
+          # Unrecognized but clean exit — treat as renewed; the UI re-check
+          # verifies ground truth afterwards.
+          reload_after_renew(server_id, output, on_step)
+      end
+    end
+  end
+
+  defp reload_after_renew(server_id, output, on_step) do
+    on_step.(:reload)
+
+    case Fleet.exec(
+           server_id,
+           "nginx -t 2>&1 && sudo systemctl reload nginx 2>&1 || systemctl reload nginx 2>&1"
+         ) do
+      {:ok, %{stdout: out, stderr: err, status: status}} when status in [0, nil] ->
+        {:ok,
+         %{renewed?: true, reloaded?: true, output: output <> "\n" <> String.trim(out <> err)}}
+
+      {:ok, %{stdout: out, stderr: err}} ->
+        {:ok,
+         %{
+           renewed?: true,
+           reloaded?: false,
+           output: output <> "\nRELOAD FAILED:\n" <> String.trim(out <> err)
+         }}
+
+      {:error, reason} ->
+        {:ok,
+         %{
+           renewed?: true,
+           reloaded?: false,
+           output: output <> "\nRELOAD FAILED: #{inspect(reason)}"
+         }}
+    end
+  end
+
+  defp truncate_output(text, max \\ 10_000) do
+    if byte_size(text) > max, do: binary_part(text, 0, max) <> "\n…[truncated]", else: text
+  end
+
+  @doc """
+  Parses `certbot certificates` into `[%{name:, domains: [...]}]`. Pure.
+  """
+  @spec parse_certbot_certificates(binary()) :: [%{name: binary(), domains: [binary()]}]
+  def parse_certbot_certificates(out) when is_binary(out) do
+    out
+    |> String.split("\n")
+    |> Enum.reduce({[], nil}, fn line, {done, current} ->
+      cond do
+        # A new block starts: flush any previous (complete or not).
+        (m = Regex.run(~r/^\s*Certificate Name:\s*(.+?)\s*$/, line)) != nil ->
+          [_, name] = m
+          flushed = if is_nil(current), do: done, else: done ++ [current]
+          {flushed, %{name: String.trim(name), domains: []}}
+
+        (m = Regex.run(~r/^\s*Domains:\s*(.+?)\s*$/, line)) != nil and not is_nil(current) ->
+          [_, domains] = m
+          {done, %{current | domains: String.split(domains, ~r/\s+/, trim: true)}}
+
+        # Dash separators / blanks end a block.
+        Regex.match?(~r/^\s*(-\s+)+-\s*$/, line) or String.trim(line) == "" ->
+          if is_nil(current), do: {done, nil}, else: {done ++ [current], nil}
+
+        true ->
+          {done, current}
+      end
+    end)
+    |> then(fn {done, current} -> if is_nil(current), do: done, else: done ++ [current] end)
+    |> Enum.filter(&(&1.name != "" and &1.domains != []))
+  end
+
+  def parse_certbot_certificates(_), do: []
+
   @doc "Summarizes checks for header pills. Pure."
   @spec cert_summary([cert_check()]) :: %{
           total: integer(),

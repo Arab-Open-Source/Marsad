@@ -407,6 +407,21 @@
   animation: marsad-rotate 0.9s linear infinite;
 }
 
+/* Indeterminate progress bar (renewal modal, long operations). */
+@keyframes marsad-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.marsad-indeterminate {
+  animation: marsad-slide 1.2s ease-in-out infinite;
+}
+
 /* CodeMirror — professional code editor (matches terminal clarity) */
 .marsad-code-editor-wrap {
   border-radius: 0 0 0.75rem 0.75rem;
@@ -469,7 +484,8 @@
     animation: none;
   }
 
-  .marsad-shimmer {
+  .marsad-shimmer,
+  .marsad-indeterminate {
     animation: none;
   }
 

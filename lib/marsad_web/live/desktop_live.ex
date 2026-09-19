@@ -1340,6 +1340,40 @@ defmodule MarsadWeb.DesktopLive do
      assign_nginx(socket, fn n -> %{n | error_log: nil, error_log_collapsed: false} end)}
   end
 
+  def handle_event("nginx-renew-cert", %{"domain" => domain}, socket) do
+    case socket.assigns.nginx do
+      %{server_id: sid, renew: nil} ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          notify = fn step -> send(lv, {:nginx_renew_progress, ref, sid, step}) end
+
+          send(
+            lv,
+            {:nginx_renew_done, ref, sid, domain, Services.cert_renew(sid, domain, notify)}
+          )
+        end)
+
+        {:noreply,
+         assign(socket, :nginx, %{
+           socket.assigns.nginx
+           | renew: %{domain: domain, step: nil, result: nil, verified_expires: nil},
+             renew_ref: ref
+         })}
+
+      %{renew: %{} = _busy} ->
+        {:noreply, put_flash(socket, :info, "A renewal is already running…")}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("nginx-renew-close", _params, socket) do
+    {:noreply, assign_nginx(socket, fn n -> %{n | renew: nil, renew_ref: nil} end)}
+  end
+
   def handle_event("nginx-config", _params, socket) do
     socket =
       case socket.assigns.nginx do
@@ -1880,7 +1914,72 @@ defmodule MarsadWeb.DesktopLive do
   def handle_info({:nginx_certs_done, ref, sid, result}, socket) do
     case socket.assigns.nginx do
       %{server_id: ^sid, certs_ref: ^ref} = n ->
-        {:noreply, assign(socket, :nginx, %{n | certs: result, certs_ref: nil})}
+        socket = assign(socket, :nginx, %{n | certs: result, certs_ref: nil})
+
+        # Feed the verified expiry into an open renew modal.
+        socket =
+          case {socket.assigns.nginx.renew, result} do
+            {%{domain: domain} = renew, {:ok, certs}} ->
+              verified =
+                Enum.find_value(certs, fn c ->
+                  if c.domain == domain, do: c.expires_at
+                end)
+
+              assign(socket, :nginx, %{
+                socket.assigns.nginx
+                | renew: %{renew | verified_expires: verified}
+              })
+
+            _ ->
+              socket
+          end
+
+        {:noreply, socket}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info({:nginx_renew_progress, ref, sid, step}, socket) do
+    case socket.assigns.nginx do
+      %{server_id: ^sid, renew_ref: ^ref} = n ->
+        renew = Map.get(n, :renew)
+
+        socket =
+          if is_map(renew),
+            do: assign(socket, :nginx, %{n | renew: %{renew | step: step}}),
+            else: socket
+
+        {:noreply, socket}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info({:nginx_renew_done, ref, sid, domain, result}, socket) do
+    case socket.assigns.nginx do
+      %{server_id: ^sid, renew_ref: ^ref} = n ->
+        summary =
+          case result do
+            {:ok, %{renewed?: true, reloaded?: true}} -> "renewed+reloaded"
+            {:ok, %{renewed?: true}} -> "renewed, reload failed"
+            {:ok, _} -> "not due"
+            {:error, reason} -> "failed: #{inspect(reason) |> String.slice(0, 120)}"
+          end
+
+        Services.audit(sid, "nginx_cert_renew", domain, summary)
+
+        # Modal keeps showing the outcome; a silent re-check refreshes ground truth.
+        socket =
+          if is_map(n.renew) do
+            assign(socket, :nginx, %{n | renew: %{n.renew | step: :done, result: result}})
+          else
+            socket
+          end
+
+        {:noreply, start_certs_recheck(socket)}
 
       _ ->
         {:noreply, socket}
@@ -2552,7 +2651,9 @@ defmodule MarsadWeb.DesktopLive do
       file_preview: nil,
       certs: nil,
       certs_ref: nil,
-      error_log_collapsed: false
+      error_log_collapsed: false,
+      renew: nil,
+      renew_ref: nil
     })
     |> assign(:nginx_load_ref, ref)
   end
@@ -2592,13 +2693,32 @@ defmodule MarsadWeb.DesktopLive do
       file_preview: preview,
       certs: nil,
       certs_ref: nil,
-      error_log_collapsed: false
+      error_log_collapsed: false,
+      renew: nil,
+      renew_ref: nil
     })
     |> assign(:nginx_load_ref, ref)
   end
 
   defp reload_nginx(%{assigns: %{nginx: %{server_id: sid}}} = socket), do: load_nginx(socket, sid)
   defp reload_nginx(socket), do: socket
+
+  defp start_certs_recheck(socket) do
+    case socket.assigns.nginx do
+      %{server_id: sid} = n ->
+        ref = make_ref()
+        lv = self()
+
+        Task.start(fn ->
+          send(lv, {:nginx_certs_done, ref, sid, Services.cert_check(sid)})
+        end)
+
+        assign(socket, :nginx, %{n | certs: :loading, certs_ref: ref})
+
+      _ ->
+        socket
+    end
+  end
 
   defp assign_nginx(%{assigns: %{nginx: nil}} = socket, _fun), do: socket
   defp assign_nginx(socket, fun), do: assign(socket, :nginx, fun.(socket.assigns.nginx))

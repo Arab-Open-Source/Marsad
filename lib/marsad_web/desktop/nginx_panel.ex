@@ -450,12 +450,237 @@ defmodule MarsadWeb.Desktop.NginxPanel do
               ]}>
                 {cert_label(c)}
               </span>
+              <button
+                phx-click="nginx-renew-cert"
+                phx-value-domain={c.domain}
+                title={"Renew certificate for #{c.domain} via certbot"}
+                data-confirm={"Renew the certificate for #{c.domain}? This contacts Let's Encrypt and reloads nginx on success."}
+                disabled={!is_nil(@state.renew)}
+                class="shrink-0 rounded-lg border border-sky-500/30 px-2 py-1 font-mono text-[10px] font-semibold text-sky-600 transition hover:bg-sky-500/10 disabled:opacity-40 dark:text-sky-300"
+              >
+                Renew
+              </button>
             </li>
           </ul>
       <% end %>
+      <.renew_modal state={@state} />
     </div>
     """
   end
+
+  # -- renew modal ----------------------------------------------------------------------
+
+  attr :state, :map, required: true
+
+  defp renew_modal(%{state: %{renew: nil}} = assigns), do: ~H""
+
+  defp renew_modal(assigns) do
+    renew = assigns.state.renew
+
+    assigns =
+      assigns
+      |> assign(:renew_icon, renew_icon(renew))
+      |> assign(:renew_icon_bg, renew_icon_bg(renew))
+      |> assign(:renew_steps, renew_steps(renew.step))
+      |> assign(:renew_hint, renew_step_hint(renew.step))
+      |> assign(:renew_error, renew_error_text(renew.result))
+
+    ~H"""
+    <div
+      id="nginx-renew-modal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Certificate renewal"
+    >
+      <div class="w-full max-w-md rounded-3xl border border-base-content/10 bg-base-100 p-6 shadow-2xl">
+        <div class="flex items-start gap-3">
+          <span class={[
+            "flex size-11 shrink-0 items-center justify-center rounded-2xl",
+            @renew_icon_bg
+          ]}>
+            <.icon name={@renew_icon} class="size-5" />
+          </span>
+          <div class="min-w-0 flex-1">
+            <h3 class="font-bold leading-tight">Renew certificate</h3>
+            <p class="truncate font-mono text-xs text-base-content/60">{@state.renew.domain}</p>
+          </div>
+          <button
+            phx-click="nginx-renew-close"
+            class="rounded p-1 text-base-content/50 transition hover:bg-base-content/10 hover:text-base-content"
+            aria-label="Close renewal dialog"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+
+        <%= if @state.renew.result == nil do %>
+          <ol class="mt-5 space-y-2.5">
+            <li :for={step <- @renew_steps} class="flex items-center gap-2.5 text-sm">
+              <span
+                :if={step.dot == :done}
+                class="flex size-5 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+              >
+                <.icon name="hero-check" class="size-3" />
+              </span>
+              <span
+                :if={step.dot == :active}
+                class="loading loading-spinner loading-xs"
+                aria-label="In progress"
+              />
+              <span
+                :if={step.dot == :pending}
+                class="size-2 rounded-full bg-base-content/20"
+                aria-hidden="true"
+              />
+              <span class={step.text_class}>{step.label}</span>
+            </li>
+          </ol>
+          <div class="mt-4 overflow-hidden rounded-full bg-base-content/10">
+            <div class="marsad-indeterminate h-1.5 w-1/3 rounded-full acc-bg" />
+          </div>
+          <p class="mt-2 text-center text-xs text-base-content/50">
+            {@renew_hint}
+          </p>
+        <% else %>
+          <.renew_outcome renew={@state.renew} error_text={@renew_error} />
+          <div class="mt-5 flex justify-end gap-2">
+            <button
+              :if={match?({:error, _}, @state.renew.result)}
+              phx-click="nginx-renew-cert"
+              phx-value-domain={@state.renew.domain}
+              class="btn btn-sm acc-bg border-0"
+            >
+              Retry
+            </button>
+            <button
+              id="nginx-renew-close-btn"
+              phx-click="nginx-renew-close"
+              class="btn btn-sm btn-ghost border border-base-content/15"
+            >
+              Close
+            </button>
+          </div>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
+
+  defp renew_steps(current) do
+    order = [:locate, :renew, :reload, :verify]
+
+    labels = %{
+      locate: "Locate certificate",
+      renew: "Renew with the authority",
+      reload: "Reload nginx",
+      verify: "Verify new expiry"
+    }
+
+    Enum.map(order, fn id ->
+      dot =
+        cond do
+          current == :done -> :done
+          id == current -> :active
+          Enum.find_index(order, &(&1 == id)) < Enum.find_index(order, &(&1 == current)) -> :done
+          true -> :pending
+        end
+
+      text_class =
+        case dot do
+          :done -> "text-base-content/80"
+          :active -> "font-semibold"
+          _ -> "text-base-content/40"
+        end
+
+      %{id: id, label: labels[id], dot: dot, text_class: text_class}
+    end)
+  end
+
+  defp renew_step_hint(:renew), do: "Contacting the certificate authority…"
+  defp renew_step_hint(:reload), do: "Reloading nginx…"
+  defp renew_step_hint(:verify), do: "Re-checking expiry…"
+  defp renew_step_hint(_), do: "Locating the certificate…"
+
+  defp renew_error_text({:error, reason}), do: format_renew_error(reason)
+  defp renew_error_text(_), do: nil
+
+  defp renew_icon(%{result: nil}), do: "hero-arrow-path"
+  defp renew_icon(%{result: {:ok, %{renewed?: true}}}), do: "hero-check-badge"
+  defp renew_icon(%{result: {:ok, _}}), do: "hero-information-circle"
+  defp renew_icon(_), do: "hero-exclamation-triangle"
+
+  defp renew_icon_bg(%{result: nil}), do: "bg-sky-500/15 text-sky-600 dark:text-sky-300"
+
+  defp renew_icon_bg(%{result: {:ok, %{renewed?: true}}}),
+    do: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+
+  defp renew_icon_bg(%{result: {:ok, _}}), do: "bg-sky-500/15 text-sky-600 dark:text-sky-300"
+  defp renew_icon_bg(_), do: "bg-red-500/15 text-red-600 dark:text-red-300"
+
+  attr :renew, :map, required: true
+  attr :error_text, :string, required: false, default: nil
+
+  defp renew_outcome(assigns) do
+    ~H"""
+    <%= case @renew.result do %>
+      <% {:ok, %{renewed?: true, reloaded?: true, output: out}} -> %>
+        <div class="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center">
+          <p class="font-bold text-emerald-700 dark:text-emerald-300">Renewed & reloaded</p>
+          <p :if={@renew.verified_expires} class="mt-1 font-mono text-xs text-base-content/60">
+            verified expiry: {Calendar.strftime(@renew.verified_expires, "%Y-%m-%d")}
+          </p>
+          <p :if={!@renew.verified_expires} class="mt-1 text-xs text-base-content/60">
+            Re-checking expiry…
+          </p>
+        </div>
+        <.renew_output output={out} />
+      <% {:ok, %{renewed?: true, reloaded?: false, output: out}} -> %>
+        <div class="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-center">
+          <p class="font-bold text-amber-700 dark:text-amber-300">Renewed — reload failed</p>
+          <p class="mt-1 text-xs text-base-content/60">
+            The new certificate is saved but nginx still serves the old one. Reload it manually, then re-check.
+          </p>
+        </div>
+        <.renew_output output={out} />
+      <% {:ok, %{output: out}} -> %>
+        <div class="mt-4 rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-center">
+          <p class="font-bold text-sky-700 dark:text-sky-300">No renewal needed</p>
+          <p class="mt-1 text-xs text-base-content/60">
+            The authority reports this certificate is not due yet — nothing changed.
+          </p>
+        </div>
+        <.renew_output output={out} />
+      <% {:error, _reason} -> %>
+        <div class="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-center">
+          <p class="font-bold text-red-600 dark:text-red-300">Renewal failed</p>
+          <p class="mt-1 font-mono text-xs text-base-content/70">{@error_text}</p>
+        </div>
+    <% end %>
+    """
+  end
+
+  attr :output, :string, required: true
+
+  defp renew_output(assigns) do
+    ~H"""
+    <details class="mt-3 rounded-xl border border-base-content/10">
+      <summary class="cursor-pointer px-3 py-2 font-mono text-[11px] text-base-content/60 hover:text-base-content">
+        Authority output
+      </summary>
+      <pre
+        class="marsad-scroll max-h-48 overflow-auto border-t border-base-content/10 bg-black/85 p-3 font-mono text-[11px] leading-relaxed text-slate-200"
+        phx-no-curly-interpolation
+      ><%= @output %></pre>
+    </details>
+    """
+  end
+
+  defp format_renew_error(:certbot_missing), do: "certbot is not installed on this server"
+  defp format_renew_error(:no_lineage), do: "no certbot certificate covers this domain"
+  defp format_renew_error(:invalid_lineage), do: "certificate name failed validation"
+  defp format_renew_error({:renew_failed, out}), do: String.slice(out, 0, 300)
+  defp format_renew_error(other), do: inspect(other)
 
   attr :summary, :map, required: true
 

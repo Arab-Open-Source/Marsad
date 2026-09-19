@@ -147,6 +147,49 @@ defmodule MarsadWeb.NginxCertsTest do
     refute has_element?(view, "#nginx-log-close")
   end
 
+  test "renew button opens a live modal ending in success", %{conn: conn, stub: stub} do
+    {:ok, view, _} = live(conn, ~p"/")
+
+    enqueue(stub, [
+      exec_reply("active\n"),
+      exec_reply("syntax ok\ntest is successful\n"),
+      exec_reply("")
+    ])
+
+    view |> element("#icon-nginx") |> render_click()
+    wait_until(fn -> has_element?(view, "#nginx-certs-check") end)
+
+    dump = "server {\n listen 443 ssl;\n server_name shop.example.com;\n}\n"
+    future = openssl_date(DateTime.add(DateTime.utc_now(), 90 * 86_400, :second))
+
+    enqueue(stub, [
+      exec_reply(dump),
+      exec_reply("shop.example.com|443|#{future}\n")
+    ])
+
+    view |> element("#nginx-certs-check") |> render_click()
+    wait_until(fn -> render(view) =~ "shop.example.com" end)
+
+    enqueue(stub, [
+      exec_reply("Certificate Name: shop.example.com\n  Domains: shop.example.com\n"),
+      exec_reply("Congratulations! Renewed.\n"),
+      exec_reply("syntax ok\n"),
+      exec_reply(dump),
+      exec_reply("shop.example.com|443|#{future}\n")
+    ])
+
+    view
+    |> element("button[phx-click=nginx-renew-cert][phx-value-domain=\"shop.example.com\"]")
+    |> render_click()
+
+    wait_until(fn -> has_element?(view, "#nginx-renew-modal") end)
+    wait_until(fn -> render(view) =~ "Renewed &" end)
+    wait_until(fn -> render(view) =~ "verified expiry" end)
+
+    view |> element("#nginx-renew-close-btn") |> render_click()
+    refute has_element?(view, "#nginx-renew-modal")
+  end
+
   test "critical certs raise a summary pill", %{conn: conn, stub: stub} do
     {:ok, view, _} = live(conn, ~p"/")
 

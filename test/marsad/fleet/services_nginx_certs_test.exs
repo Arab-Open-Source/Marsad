@@ -123,6 +123,141 @@ defmodule Marsad.Fleet.ServicesNginxCertsTest do
              )
   end
 
+  test "parse_certbot_certificates extracts lineages" do
+    out = """
+    Saving debug log
+    - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    Found the following certs:
+      Certificate Name: shop.example.com
+        Serial Number: abc
+        Domains: shop.example.com www.shop.example.com
+        Expiry Date: 2026-09-01
+    - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      Certificate Name: lonely.example.com
+    - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    """
+
+    assert [
+             %{name: "shop.example.com", domains: ["shop.example.com", "www.shop.example.com"]}
+           ] = Services.parse_certbot_certificates(out)
+
+    assert Services.parse_certbot_certificates("garbage") == []
+    assert Services.parse_certbot_certificates("") == []
+  end
+
+  test "cert_renew renews, reloads and reports honestly" do
+    {:ok, server} =
+      Marsad.Fleet.create_server(%{
+        name: "renew-#{System.unique_integer([:positive])}",
+        host: "127.0.0.1",
+        port: 22,
+        username: "root",
+        auth_type: "password",
+        secret: "x"
+      })
+
+    kill_registry(server.id)
+    stub = start_stub(server.id)
+    on_exit(fn -> if Process.alive?(stub), do: GenServer.stop(stub, :normal, 1000) end)
+
+    certs_out = """
+    Found the following certs:
+      Certificate Name: shop.example.com
+        Domains: shop.example.com
+    """
+
+    parent = self()
+    notify = fn step -> send(parent, {:step, step}) end
+
+    for reply <- [
+          {:ok, %{stdout: certs_out, stderr: "", status: 0}},
+          {:ok, %{stdout: "Congratulations! Renewal success.\n", stderr: "", status: 0}},
+          {:ok, %{stdout: "syntax ok\n", stderr: "", status: 0}}
+        ] do
+      FileSessionStub.enqueue(stub, reply)
+    end
+
+    assert {:ok, %{renewed?: true, reloaded?: true, output: out}} =
+             Services.cert_renew(server.id, "shop.example.com", notify)
+
+    assert out =~ "Congratulations"
+    assert_received {:step, :locate}
+    assert_received {:step, :renew}
+    assert_received {:step, :reload}
+  end
+
+  test "cert_renew reports not-due without reloading" do
+    {:ok, server} =
+      Marsad.Fleet.create_server(%{
+        name: "notdue-#{System.unique_integer([:positive])}",
+        host: "127.0.0.1",
+        port: 22,
+        username: "root",
+        auth_type: "password",
+        secret: "x"
+      })
+
+    kill_registry(server.id)
+    stub = start_stub(server.id)
+    on_exit(fn -> if Process.alive?(stub), do: GenServer.stop(stub, :normal, 1000) end)
+
+    for reply <- [
+          {:ok, %{stdout: "Certificate Name: a.com\n  Domains: a.com\n", stderr: "", status: 0}},
+          {:ok,
+           %{
+             stdout: "Cert not yet due for renewal\nKeeping the existing certificate\n",
+             stderr: "",
+             status: 0
+           }}
+        ] do
+      FileSessionStub.enqueue(stub, reply)
+    end
+
+    assert {:ok, %{renewed?: false, reloaded?: false}} =
+             Services.cert_renew(server.id, "a.com")
+  end
+
+  test "cert_renew fails loudly on missing lineage, failed renew and failed reload" do
+    {:ok, server} =
+      Marsad.Fleet.create_server(%{
+        name: "renewfail-#{System.unique_integer([:positive])}",
+        host: "127.0.0.1",
+        port: 22,
+        username: "root",
+        auth_type: "password",
+        secret: "x"
+      })
+
+    kill_registry(server.id)
+    stub = start_stub(server.id)
+    on_exit(fn -> if Process.alive?(stub), do: GenServer.stop(stub, :normal, 1000) end)
+
+    # No lineage covers the domain.
+    FileSessionStub.enqueue(stub, {:ok, %{stdout: "No certs found.\n", stderr: "", status: 0}})
+    assert {:error, :no_lineage} = Services.cert_renew(server.id, "ghost.example.com")
+
+    # Renew command fails.
+    for reply <- [
+          {:ok, %{stdout: "Certificate Name: a.com\n  Domains: a.com\n", stderr: "", status: 0}},
+          {:ok, %{stdout: "Failed to renew\n", stderr: "auth failed", status: 1}}
+        ] do
+      FileSessionStub.enqueue(stub, reply)
+    end
+
+    assert {:error, {:renew_failed, _}} = Services.cert_renew(server.id, "a.com")
+
+    # Renewed but reload fails — renewal is preserved in the result.
+    for reply <- [
+          {:ok, %{stdout: "Certificate Name: a.com\n  Domains: a.com\n", stderr: "", status: 0}},
+          {:ok, %{stdout: "Congratulations, renewed!\n", stderr: "", status: 0}},
+          {:ok, %{stdout: "emerg foo\n", stderr: "", status: 1}}
+        ] do
+      FileSessionStub.enqueue(stub, reply)
+    end
+
+    assert {:ok, %{renewed?: true, reloaded?: false}} = Services.cert_renew(server.id, "a.com")
+  end
+
   test "cert_check runs dump then loop via stub" do
     {:ok, server} =
       Marsad.Fleet.create_server(%{

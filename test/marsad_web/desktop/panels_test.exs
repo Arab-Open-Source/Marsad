@@ -44,7 +44,9 @@ defmodule MarsadWeb.Desktop.PanelsTest do
         file_preview: nil,
         certs: nil,
         certs_ref: nil,
-        error_log_collapsed: false
+        error_log_collapsed: false,
+        renew: nil,
+        renew_ref: nil
       },
       overrides
     )
@@ -263,5 +265,46 @@ defmodule MarsadWeb.Desktop.PanelsTest do
     assert html =~ "expires in 5d"
     assert html =~ "(wildcard)"
     assert html =~ "check failed"
+    assert html =~ "Renew"
+  end
+
+  test "nginx renew modal shows steps, success and failure" do
+    render = fn renew ->
+      render_component(&NginxPanel.panel/1,
+        servers: servers(),
+        state: nginx_state(%{server_id: 1, renew: renew})
+      )
+    end
+
+    running =
+      render.(%{domain: "a.com", step: :renew, result: nil, verified_expires: nil})
+
+    assert running =~ "nginx-renew-modal"
+    assert running =~ "Renew with the authority"
+    assert running =~ "marsad-indeterminate"
+
+    done =
+      render.(%{
+        domain: "a.com",
+        step: :done,
+        result: {:ok, %{renewed?: true, reloaded?: true, output: "Congratulations"}},
+        verified_expires: ~U[2027-01-01 00:00:00Z]
+      })
+
+    assert done =~ "Renewed &"
+    assert done =~ "2027-01-01"
+    assert done =~ "Authority output"
+
+    failed =
+      render.(%{
+        domain: "a.com",
+        step: :done,
+        result: {:error, :no_lineage},
+        verified_expires: nil
+      })
+
+    assert failed =~ "Renewal failed"
+    assert failed =~ "no certbot certificate"
+    assert failed =~ "Retry"
   end
 end
