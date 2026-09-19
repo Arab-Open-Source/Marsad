@@ -1,5 +1,5 @@
 defmodule Marsad.FleetTest do
-  use Marsad.DataCase, async: true
+  use Marsad.DataCase, async: false
 
   alias Marsad.Fleet
   alias Marsad.Fleet.CredentialVault

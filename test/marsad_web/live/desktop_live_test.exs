@@ -1,7 +1,24 @@
 defmodule MarsadWeb.DesktopLiveTest do
-  use MarsadWeb.ConnCase, async: true
+  use MarsadWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+
+  setup %{conn: conn} do
+    {:ok, conn: log_in_admin(conn)}
+  end
+
+  test "redirects to login when unauthenticated" do
+    # The shared setup already created the admin, so a raw conn is a guest post-setup.
+    conn = Phoenix.ConnTest.build_conn()
+    assert {:error, {:redirect, %{to: "/login"}}} = live(conn, ~p"/")
+  end
+
+  test "redirects to setup on fresh install" do
+    # Wipe the setup-created admin to simulate first run.
+    :ok = Marsad.Accounts.reset_all()
+    conn = Phoenix.ConnTest.build_conn()
+    assert {:error, {:redirect, %{to: "/setup"}}} = live(conn, ~p"/")
+  end
 
   test "desktop shell renders with app icons and taskbar", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
@@ -80,7 +97,9 @@ defmodule MarsadWeb.DesktopLiveTest do
     {:ok, view, _html} = live(conn, ~p"/")
 
     view |> element("#icon-files") |> render_click()
-    assert has_element?(view, "#files-skeleton")
+
+    # Loading is async: either the skeleton or the final error must appear.
+    assert has_element?(view, "#files-skeleton") or has_element?(view, "#files-error")
 
     wait_until(fn -> has_element?(view, "#files-error") end)
     assert has_element?(view, "#files-error")

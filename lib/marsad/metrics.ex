@@ -38,20 +38,18 @@ defmodule Marsad.Metrics do
     label_fmt = if hours <= 24, do: "%H:%M", else: "%m/%d %H:%M"
 
     %{
-      labels:
-        Enum.map(snapshots, fn s ->
-          Calendar.strftime(DateTime.shift_zone!(s.inserted_at, "Etc/UTC"), label_fmt)
-        end),
+      labels: Enum.map(snapshots, fn s -> format_label(s.inserted_at, label_fmt) end),
       datasets: [
         %{
           label: "CPU %",
           data:
             Enum.map(snapshots, fn s ->
               cores = max(s.cores || 1, 1)
+              load1 = s.load1 || 0.0
 
-              # CPU % as load1/cores*100, capped at 100*core count for burst, but show as % of one core*100
+              # CPU % as load1/cores*100, capped at 200 (burst allowance).
               # For a 3-core system, load 3.0 = 100% (all cores at 100%)
-              round(min(s.load1 / cores * 100, 100 * 2))
+              round(min(load1 / cores * 100, 200))
             end),
           borderColor: "#0ea5e9",
           backgroundColor: "rgba(14,165,233,0.12)",
@@ -64,7 +62,9 @@ defmodule Marsad.Metrics do
           label: "Mem %",
           data:
             Enum.map(snapshots, fn s ->
-              if s.mem_total_mb > 0, do: round(s.mem_used_mb / s.mem_total_mb * 100), else: 0
+              total = s.mem_total_mb || 0
+              used = s.mem_used_mb || 0
+              if total > 0, do: round(used / total * 100), else: 0
             end),
           borderColor: "#10b981",
           backgroundColor: "rgba(16,185,129,0.12)",
@@ -75,7 +75,7 @@ defmodule Marsad.Metrics do
         },
         %{
           label: "Disk %",
-          data: Enum.map(snapshots, & &1.disk_pct),
+          data: Enum.map(snapshots, &max(min(&1.disk_pct || 0, 100), 0)),
           borderColor: "#f59e0b",
           backgroundColor: "rgba(245,158,11,0.12)",
           tension: 0.35,
@@ -86,4 +86,17 @@ defmodule Marsad.Metrics do
       ]
     }
   end
+
+  defp format_label(nil, _fmt), do: "—"
+
+  defp format_label(%DateTime{} = dt, fmt) do
+    case DateTime.shift_zone(dt, "Etc/UTC") do
+      {:ok, shifted} -> Calendar.strftime(shifted, fmt)
+      _ -> Calendar.strftime(dt, fmt)
+    end
+  rescue
+    _ -> "—"
+  end
+
+  defp format_label(_, _), do: "—"
 end

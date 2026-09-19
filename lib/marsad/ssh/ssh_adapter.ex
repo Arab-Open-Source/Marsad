@@ -16,7 +16,7 @@ defmodule Marsad.SSH.SshAdapter do
   def connect(%{host: host, port: port, username: username} = params) do
     :ssh.start()
 
-    opts =
+    {opts, cleanup_path} =
       [
         user: to_charlist(username),
         user_interaction: false,
@@ -25,14 +25,20 @@ defmodule Marsad.SSH.SshAdapter do
       ]
       |> with_auth(params)
 
-    case :ssh.connect(to_charlist(host), port || 22, opts, @connect_timeout) do
-      {:ok, conn} ->
-        {:ok, conn}
+    result =
+      case :ssh.connect(to_charlist(host), port || 22, opts, @connect_timeout) do
+        {:ok, conn} ->
+          {:ok, conn}
 
-      {:error, reason} ->
-        Logger.warning("SSH connect failed to #{host}: #{inspect(reason)}")
-        {:error, reason}
-    end
+        {:error, reason} ->
+          Logger.warning("SSH connect failed to #{host}: #{inspect(reason)}")
+          {:error, reason}
+      end
+
+    # The temp PEM file is only needed during the handshake — remove it right away.
+    if cleanup_path, do: File.rm(cleanup_path)
+
+    result
   end
 
   @impl true
@@ -62,6 +68,86 @@ defmodule Marsad.SSH.SshAdapter do
     :ok
   rescue
     _ -> :ok
+  end
+
+  @shell_timeout 10_000
+
+  @impl true
+  def open_shell(conn, cols, rows) do
+    with {:ok, channel} <- :ssh_connection.session_channel(conn, @shell_timeout) do
+      result =
+        with :success <-
+               :ssh_connection.ptty_alloc(
+                 conn,
+                 channel,
+                 [term: ~c"xterm-256color", width: cols, height: rows],
+                 @shell_timeout
+               ),
+             shell_result when shell_result in [:ok, :success] <-
+               :ssh_connection.shell(conn, channel) do
+          {:ok, channel}
+        else
+          {:error, _} = error -> error
+          :failure -> {:error, :request_failed}
+          error -> {:error, error}
+        end
+
+      # Never leak a half-opened channel.
+      case result do
+        {:ok, _} ->
+          result
+
+        error ->
+          shell_close(conn, channel)
+          error
+      end
+    end
+  rescue
+    _ -> {:error, :crashed}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @impl true
+  def shell_send(conn, channel, data) do
+    case :ssh_connection.send(conn, channel, IO.iodata_to_binary(data)) do
+      :ok -> :ok
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:error, :crashed}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @impl true
+  def shell_resize(conn, channel, cols, rows) do
+    :ssh_connection.window_change(conn, channel, cols, rows)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  @impl true
+  def shell_close(conn, channel) do
+    :ssh_connection.close(conn, channel)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  @impl true
+  def shell_eof(conn, channel) do
+    :ssh_connection.send_eof(conn, channel)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc """
@@ -313,30 +399,47 @@ defmodule Marsad.SSH.SshAdapter do
   defp format_perms(mode) when is_integer(mode) do
     import Bitwise
     r = fn bit, c -> if (mode &&& bit) != 0, do: c, else: "-" end
-    r.(0o400, "r") <> r.(0o200, "w") <> r.(0o100, "x") <> r.(0o040, "r") <> r.(0o004, "r")
+
+    r.(0o400, "r") <>
+      r.(0o200, "w") <>
+      r.(0o100, "x") <>
+      r.(0o040, "r") <>
+      r.(0o020, "w") <>
+      r.(0o010, "x") <> r.(0o004, "r") <> r.(0o002, "w") <> r.(0o001, "x")
   end
 
-  defp format_perms(_), do: "?????"
+  defp format_perms(_), do: "?????????"
 
   defp with_auth(opts, %{auth_type: "password", secret: secret}) when is_binary(secret) do
-    Keyword.put(opts, :password, to_charlist(secret))
+    {Keyword.put(opts, :password, to_charlist(secret)), nil}
   end
 
   defp with_auth(opts, %{auth_type: "key", secret: secret}) when is_binary(secret) do
     case key_file_for(secret) do
-      {:ok, path, cleanup?} ->
-        opts
-        |> Keyword.put(:user_dir, String.to_charlist(Path.dirname(path)))
-        |> Keyword.put(:identity, String.to_charlist(path))
-        |> Keyword.put(:cleanup_key_file, cleanup?)
-        |> Keyword.put(:save_accepted_host, false)
+      {:ok, path, true} ->
+        opts =
+          opts
+          |> Keyword.put(:user_dir, String.to_charlist(Path.dirname(path)))
+          |> Keyword.put(:identity, String.to_charlist(path))
+          |> Keyword.put(:save_accepted_host, false)
+
+        {opts, path}
+
+      {:ok, path, false} ->
+        opts =
+          opts
+          |> Keyword.put(:user_dir, String.to_charlist(Path.dirname(path)))
+          |> Keyword.put(:identity, String.to_charlist(path))
+          |> Keyword.put(:save_accepted_host, false)
+
+        {opts, nil}
 
       :error ->
-        opts
+        {opts, nil}
     end
   end
 
-  defp with_auth(opts, _), do: opts
+  defp with_auth(opts, _), do: {opts, nil}
 
   # PEM content -> temp file (removed after connect by the caller session);
   # otherwise treat the secret as a path to an existing key file.
@@ -360,10 +463,20 @@ defmodule Marsad.SSH.SshAdapter do
   defp collect(channel, conn, timeout, acc) do
     receive do
       {:ssh_cm, ^conn, {:data, ^channel, 0, data}} ->
-        collect(channel, conn, timeout, Map.update!(acc, :stdout, &(&1 <> to_string(data))))
+        collect(
+          channel,
+          conn,
+          timeout,
+          Map.update!(acc, :stdout, &(&1 <> IO.iodata_to_binary(data)))
+        )
 
       {:ssh_cm, ^conn, {:data, ^channel, 1, data}} ->
-        collect(channel, conn, timeout, Map.update!(acc, :stderr, &(&1 <> to_string(data))))
+        collect(
+          channel,
+          conn,
+          timeout,
+          Map.update!(acc, :stderr, &(&1 <> IO.iodata_to_binary(data)))
+        )
 
       {:ssh_cm, ^conn, {:eof, ^channel}} ->
         collect(channel, conn, timeout, acc)

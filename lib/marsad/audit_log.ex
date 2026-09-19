@@ -3,7 +3,7 @@ defmodule Marsad.AuditLog do
   import Ecto.Changeset
 
   schema "audit_logs" do
-    field :server_id, :integer
+    belongs_to :server, Marsad.Fleet.Server
     field :action, :string
     field :container, :string
     field :details, :string
@@ -15,5 +15,8 @@ defmodule Marsad.AuditLog do
     log
     |> cast(attrs, [:server_id, :action, :container, :details])
     |> validate_required([:server_id, :action])
+    |> validate_length(:action, max: 64)
+    |> validate_length(:container, max: 255)
+    |> foreign_key_constraint(:server_id)
   end
 end

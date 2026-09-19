@@ -2,14 +2,26 @@ defmodule MarsadWeb.DesktopLive do
   @moduledoc """
   Mini-OS desktop shell: app icons, draggable windows, taskbar and a
   real xterm.js terminal (one exec channel per submitted line over SSH).
+
+  NOTE on LiveView streams: collections here are small and bounded by design
+  (servers < 100, files per dir capped by SFTP listing, procs capped at 80,
+  containers/units < 100, transcripts capped at #{200}, file previews truncated
+  at 200KB, uploads capped at 3/20 entries x 50MB). Plain assigns keep panel
+  state (tabs stay mounted when hidden) simple and testable; streams would
+  force reset/re-stream on every filter/sort and break hidden-panel state.
+  If any collection grows unbounded in the future, migrate that list to
+  `stream/3` with `reset: true` on filter.
   """
   use MarsadWeb, :live_view
 
+  alias Marsad.Accounts
   alias Marsad.Fleet
   alias Marsad.Fleet.Server
+  alias Marsad.Fleet.ServerShell
   alias Marsad.Fleet.Services
   alias Marsad.Repo.Retry
   alias Marsad.Settings
+  alias Marsad.Terminal
   alias MarsadWeb.Desktop.DockerPanel
   alias MarsadWeb.Desktop.FilesComponent
   alias MarsadWeb.Desktop.NginxPanel
@@ -36,7 +48,6 @@ defmodule MarsadWeb.DesktopLive do
     }
   ]
 
-  @transcript_limit 200
   @metrics_interval 15_000
   @min_metrics_interval 5_000
 
@@ -64,6 +75,7 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:files_filter, "")
      |> assign(:files_search_results, nil)
      |> assign(:files_search_ref, nil)
+     |> assign(:files_search_truncated, false)
      |> assign(:mkdir_form, to_form(%{"dirname" => ""}))
      |> assign(:monitor_server_id, active_default(servers))
      |> assign(:metrics, %{})
@@ -83,20 +95,23 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:systemd, nil)
      |> assign(:nginx, nil)
      |> assign(:nginx_load_ref, nil)
+     |> assign(:password_form, to_form(%{"password" => "", "confirm" => ""}))
+     |> assign(:password_msg, nil)
+     |> assign(:term_shells, %{})
      |> allow_upload(:remote_files,
        accept: :any,
-       max_entries: 10,
-       max_file_size: 1_000_000_000,
+       max_entries: 3,
+       max_file_size: 50_000_000,
        chunk_size: 64_000,
-       chunk_timeout: 120_000,
+       chunk_timeout: 60_000,
        auto_upload: false
      )
      |> allow_upload(:remote_folder,
        accept: :any,
-       max_entries: 100,
-       max_file_size: 1_000_000_000,
+       max_entries: 20,
+       max_file_size: 50_000_000,
        chunk_size: 64_000,
-       chunk_timeout: 120_000,
+       chunk_timeout: 60_000,
        auto_upload: false
      )}
   end
@@ -143,6 +158,7 @@ defmodule MarsadWeb.DesktopLive do
 
     {:noreply,
      socket
+     |> close_term_shell(id)
      |> assign(:windows, windows)
      |> assign(:transcripts, Map.delete(socket.assigns.transcripts, id))
      |> assign(:focused_id, focused_fallback(windows, socket.assigns.focused_id, id))}
@@ -262,7 +278,8 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:file_browser, nil)
      |> assign(:files_filter, "")
      |> assign(:files_search_results, nil)
-     |> assign(:files_search_ref, nil)}
+     |> assign(:files_search_ref, nil)
+     |> assign(:files_search_truncated, false)}
   end
 
   def handle_event("files-server", %{"server_id" => id}, socket) do
@@ -274,6 +291,7 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:files_filter, "")
      |> assign(:files_search_results, nil)
      |> assign(:files_search_ref, nil)
+     |> assign(:files_search_truncated, false)
      |> load_browser(server_id, nil)}
   end
 
@@ -286,7 +304,15 @@ defmodule MarsadWeb.DesktopLive do
      socket
      |> assign(:files_filter, "")
      |> assign(:files_search_results, nil)
-     |> assign(:files_search_ref, nil)}
+     |> assign(:files_search_ref, nil)
+     |> assign(:files_search_truncated, false)}
+  end
+
+  def handle_event("files-drop-token", %{"token" => token}, socket) do
+    handle_files_filter(
+      Marsad.Files.remove_token(socket.assigns.files_filter || "", token),
+      socket
+    )
   end
 
   def handle_event("files-refresh", _params, socket) do
@@ -299,6 +325,7 @@ defmodule MarsadWeb.DesktopLive do
          |> assign(:files_filter, "")
          |> assign(:files_search_results, nil)
          |> assign(:files_search_ref, nil)
+         |> assign(:files_search_truncated, false)
          |> load_browser(b.server_id, b.path),
        else: socket
      )}
@@ -345,6 +372,7 @@ defmodule MarsadWeb.DesktopLive do
          |> assign(:files_filter, "")
          |> assign(:files_search_results, nil)
          |> assign(:files_search_ref, nil)
+         |> assign(:files_search_truncated, false)
          |> load_browser(b.server_id, Fleet.remote_parent(b.path))}
     end
   end
@@ -360,6 +388,7 @@ defmodule MarsadWeb.DesktopLive do
          |> assign(:files_filter, "")
          |> assign(:files_search_results, nil)
          |> assign(:files_search_ref, nil)
+         |> assign(:files_search_truncated, false)
          |> load_browser(b.server_id, path)}
     end
   end
@@ -375,6 +404,7 @@ defmodule MarsadWeb.DesktopLive do
          |> assign(:files_filter, "")
          |> assign(:files_search_results, nil)
          |> assign(:files_search_ref, nil)
+         |> assign(:files_search_truncated, false)
          |> load_browser(b.server_id, Fleet.remote_join(b.path, name))}
     end
   end
@@ -1196,59 +1226,170 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
-  def handle_event("terminal_ready", %{"window_id" => wid}, socket) do
-    window = find_window(socket, wid)
-    transcript = Map.get(socket.assigns.transcripts, wid, [])
-
+  def handle_event("change-password", %{"password" => password, "confirm" => confirm}, socket) do
     socket =
-      if transcript == [] do
-        push_output(
-          socket,
-          wid,
-          welcome_banner(window, socket.assigns) <> prompt_for(window, socket.assigns)
-        )
-      else
-        push_event(socket, "terminal_output", %{data: Enum.join(transcript), window_id: wid})
+      cond do
+        password != confirm ->
+          assign(socket, :password_msg, {:error, "Passwords do not match"})
+
+        true ->
+          admin = socket.assigns[:current_admin] || Accounts.first_admin()
+
+          case admin && Accounts.update_password(admin, %{"password" => password}) do
+            {:ok, _} ->
+              socket
+              |> assign(:password_form, to_form(%{"password" => "", "confirm" => ""}))
+              |> assign(:password_msg, {:ok, "Password updated"})
+
+            {:error, %Ecto.Changeset{} = cs} ->
+              msg =
+                cs.errors
+                |> Enum.map_join(", ", fn {field, {text, _}} -> "#{field} #{text}" end)
+                |> case do
+                  "" -> "Invalid password (min 8 characters)"
+                  text -> text
+                end
+
+              assign(socket, :password_msg, {:error, msg})
+
+            _ ->
+              assign(socket, :password_msg, {:error, "No admin account found"})
+          end
       end
 
     {:noreply, socket}
   end
 
-  def handle_event("terminal_input", %{"data" => "\u0003", "window_id" => wid}, socket) do
-    # Ctrl+C is rendered locally by the hook; just record it.
-    {:noreply, append_transcript(socket, wid, "^C\r\n")}
+  def handle_event("reset-auth", _params, socket) do
+    Accounts.reset_all()
+    {:noreply, push_navigate(socket, to: "/setup")}
+  end
+
+  # -- interactive shell terminal ----------------------------------------------
+  #
+  # Server-backed windows hold ONE persistent PTY shell (see
+  # `Marsad.Fleet.ServerShell`): keystrokes stream in raw, screen bytes
+  # stream out — vim/nano/top and `cd` all work natively. Windows without
+  # a server stay in local demo mode (line discipline in the hook).
+
+  def handle_event("terminal_ready", %{"window_id" => wid} = params, socket) do
+    window = find_window(socket, wid)
+    cols = to_pos_int(params["cols"], 80)
+    rows = to_pos_int(params["rows"], 24)
+
+    case server_for(window, socket.assigns) do
+      nil ->
+        socket =
+          socket
+          |> push_event("terminal_mode", %{mode: "demo", window_id: wid})
+          |> then(fn s ->
+            if Map.get(s.assigns.transcripts, wid, []) == [] do
+              push_output(
+                s,
+                wid,
+                Terminal.welcome_banner(nil) <> Terminal.demo_prompt()
+              )
+            else
+              push_event(s, "terminal_output", %{
+                data: Enum.join(Map.get(s.assigns.transcripts, wid, [])),
+                window_id: wid
+              })
+            end
+          end)
+
+        {:noreply, socket}
+
+      server ->
+        socket = push_event(socket, "terminal_mode", %{mode: "shell", window_id: wid})
+
+        socket =
+          case ServerShell.ensure(server.id, wid, self(), cols, rows) do
+            {:ok, pid} ->
+              socket
+              |> assign(
+                :term_shells,
+                Map.put(socket.assigns.term_shells, wid, %{pid: pid, open: false})
+              )
+              |> then(fn s ->
+                if Map.get(s.assigns.transcripts, wid, []) == [] do
+                  push_output(
+                    s,
+                    wid,
+                    "\e[2mconnecting to #{server.username}@#{server.host}…\e[0m\r\n"
+                  )
+                else
+                  push_event(s, "terminal_output", %{
+                    data: Enum.join(Map.get(s.assigns.transcripts, wid, [])),
+                    window_id: wid
+                  })
+                end
+              end)
+
+            {:error, reason} ->
+              push_output(
+                socket,
+                wid,
+                "✖ cannot open shell: #{inspect(reason)}\r\n[press Enter to retry]\r\n"
+              )
+          end
+
+        {:noreply, socket}
+    end
   end
 
   def handle_event("terminal_input", %{"data" => data, "window_id" => wid}, socket) do
-    line = String.trim_trailing(data, "\n")
     window = find_window(socket, wid)
-    socket = append_transcript(socket, wid, "$ #{line}\r\n")
 
-    socket =
-      case String.trim(line) do
-        "" ->
-          push_output(socket, wid, prompt_for(window, socket.assigns))
+    case server_for(window, socket.assigns) do
+      nil ->
+        {:noreply, demo_input(socket, wid, String.trim_trailing(data, "\n"))}
 
-        "clear" ->
-          socket
-          |> assign(:transcripts, Map.put(socket.assigns.transcripts, wid, []))
-          |> push_event("terminal_clear", %{window_id: wid})
-          |> push_output(wid, prompt_for(window, socket.assigns))
+      server ->
+        {:noreply, shell_input(socket, wid, server, data)}
+    end
+  end
 
-        "help" ->
-          push_output(socket, wid, help_text() <> prompt_for(window, socket.assigns))
+  def handle_event(
+        "terminal_resize",
+        %{"cols" => cols, "rows" => rows, "window_id" => wid},
+        socket
+      ) do
+    window = find_window(socket, wid)
 
-        cmd ->
-          run_remote(socket, window, wid, cmd)
-      end
+    case server_for(window, socket.assigns) do
+      nil ->
+        {:noreply, socket}
 
-    {:noreply, socket}
+      server ->
+        case Map.get(socket.assigns.term_shells, wid) do
+          %{pid: pid} when is_pid(pid) ->
+            if Process.alive?(pid) do
+              _ =
+                ServerShell.resize(
+                  server.id,
+                  wid,
+                  self(),
+                  to_pos_int(cols, 80),
+                  to_pos_int(rows, 24)
+                )
+            end
+
+            {:noreply, socket}
+
+          _ ->
+            {:noreply, socket}
+        end
+    end
   end
 
   def handle_event("terminal_resize", _params, socket), do: {:noreply, socket}
 
   def handle_event("terminal_copy", %{"window" => wid}, socket) do
     {:noreply, push_event(socket, "terminal_copy_selection", %{window_id: wid})}
+  end
+
+  def handle_event("terminal_clear_window", %{"window" => wid}, socket) do
+    {:noreply, clear_terminal(socket, find_window(socket, wid), wid)}
   end
 
   defp handle_files_filter(filter, socket) do
@@ -1265,7 +1406,7 @@ defmodule MarsadWeb.DesktopLive do
               send(
                 pid,
                 {:files_search_loaded, ref, server_id,
-                 Marsad.Files.search_remote_files(server_id, filter)}
+                 Marsad.Files.search_remote(server_id, filter)}
               )
             end)
 
@@ -1273,14 +1414,16 @@ defmodule MarsadWeb.DesktopLive do
              socket
              |> assign(:files_filter, filter)
              |> assign(:files_search_results, :loading)
-             |> assign(:files_search_ref, ref)}
+             |> assign(:files_search_ref, ref)
+             |> assign(:files_search_truncated, false)}
           end
         else
           {:noreply,
            socket
            |> assign(:files_filter, filter)
            |> assign(:files_search_results, nil)
-           |> assign(:files_search_ref, nil)}
+           |> assign(:files_search_ref, nil)
+           |> assign(:files_search_truncated, false)}
         end
 
       _ ->
@@ -1288,7 +1431,8 @@ defmodule MarsadWeb.DesktopLive do
          socket
          |> assign(:files_filter, filter)
          |> assign(:files_search_results, nil)
-         |> assign(:files_search_ref, nil)}
+         |> assign(:files_search_ref, nil)
+         |> assign(:files_search_truncated, false)}
     end
   end
 
@@ -1437,9 +1581,24 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
-  def handle_info({:files_search_loaded, ref, sid, results}, socket) do
+  def handle_info({:files_search_loaded, ref, sid, %{entries: entries} = result}, socket) do
     if socket.assigns.files_search_ref == ref && socket.assigns.active_server_id == sid do
-      {:noreply, assign(socket, :files_search_results, results)}
+      {:noreply,
+       socket
+       |> assign(:files_search_results, entries)
+       |> assign(:files_search_truncated, Map.get(result, :truncated?, false))}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # Back-compat: plain entry lists (older callers/tests).
+  def handle_info({:files_search_loaded, ref, sid, results}, socket) when is_list(results) do
+    if socket.assigns.files_search_ref == ref && socket.assigns.active_server_id == sid do
+      {:noreply,
+       socket
+       |> assign(:files_search_results, results)
+       |> assign(:files_search_truncated, false)}
     else
       {:noreply, socket}
     end
@@ -1457,6 +1616,76 @@ defmodule MarsadWeb.DesktopLive do
        })}
     else
       {:noreply, socket}
+    end
+  end
+
+  # -- interactive shell terminal --------------------------------------------------
+  # Messages from `Marsad.Fleet.ServerShell` (keyed {:shell, sid, wid, lv}).
+
+  def handle_info({:shell_opened, {:shell, sid, wid, lv}}, socket) do
+    if find_window(socket, wid) do
+      socket =
+        case Map.get(socket.assigns.term_shells, wid) do
+          %{pid: pid} = entry when is_pid(pid) ->
+            assign(
+              socket,
+              :term_shells,
+              Map.put(socket.assigns.term_shells, wid, %{entry | open: true})
+            )
+
+          _ ->
+            socket
+        end
+
+      {:noreply, socket}
+    else
+      # Window already closed — don't leak the shell.
+      ServerShell.close(sid, wid, lv)
+      {:noreply, assign(socket, :term_shells, Map.delete(socket.assigns.term_shells, wid))}
+    end
+  end
+
+  def handle_info({:shell_output, {:shell, _sid, wid, _lv}, data}, socket) do
+    if find_window(socket, wid) do
+      {:noreply, push_output(socket, wid, data)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:shell_failed, {:shell, _sid, wid, _lv}, reason}, socket) do
+    socket = assign(socket, :term_shells, Map.delete(socket.assigns.term_shells, wid))
+
+    if find_window(socket, wid) do
+      {:noreply,
+       push_output(
+         socket,
+         wid,
+         "✖ cannot open shell: #{inspect(reason)}\r\n[press Enter to retry]\r\n"
+       )}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:shell_closed, {:shell, _sid, wid, _lv}, _reason}, socket) do
+    socket = assign(socket, :term_shells, Map.delete(socket.assigns.term_shells, wid))
+
+    if find_window(socket, wid) do
+      {:noreply,
+       push_output(socket, wid, "\r\n\e[2m[session ended — press Enter to reopen]\e[0m\r\n")}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # Honest pill state: a live shell process means "connected", not
+  # "a command is running" (only the remote shell knows that).
+  defp term_shell_state(shells, wid) do
+    case Map.get(shells, wid) do
+      %{pid: pid, open: true} when is_pid(pid) -> if Process.alive?(pid), do: :open, else: :dead
+      %{pid: pid} when is_pid(pid) -> if Process.alive?(pid), do: :connecting, else: :dead
+      _ -> :dead
     end
   end
 
@@ -1495,6 +1724,17 @@ defmodule MarsadWeb.DesktopLive do
       if Map.has_key?(s.assigns.top_procs, server_id),
         do: assign(s, :top_procs, Map.delete(s.assigns.top_procs, server_id)),
         else: s
+    end)
+    |> then(fn s ->
+      # Kill terminal shells bound to the deleted server.
+      ServerShell.close_for_server(server_id)
+
+      wids =
+        for w <- s.assigns.windows,
+            w.app == "terminal" and w.server_id == server_id,
+            do: w.id
+
+      assign(s, :term_shells, Map.drop(s.assigns.term_shells, wids))
     end)
   end
 
@@ -1830,123 +2070,142 @@ defmodule MarsadWeb.DesktopLive do
     if sid, do: Enum.find(assigns.servers, &(&1.id == sid)), else: nil
   end
 
-  defp prompt_for(window, assigns) do
-    case server_for(window, assigns) do
-      nil ->
-        "\e[36mmarsad\e[90m$\e[0m "
+  # Toolbar Clear: wipes the local screen. Server windows get no synthetic
+  # prompt — the remote shell owns its prompt; demo windows do.
+  defp clear_terminal(socket, window, wid) do
+    socket = assign(socket, :transcripts, Map.put(socket.assigns.transcripts, wid, []))
+    socket = push_event(socket, "terminal_clear", %{window_id: wid})
 
-      server ->
-        "\e[32m#{server.username}\e[90m@\e[34m#{server.host}\e[90m$\e[0m "
+    if server_for(window, socket.assigns) do
+      socket
+    else
+      push_output(socket, wid, Terminal.demo_prompt())
     end
   end
 
-  defp welcome_banner(window, assigns) do
-    case server_for(window, assigns) do
-      nil ->
-        "\e[1;36mMarsad OS\e[0m · Terminal \e[90m(demo mode — v0.0.1 — add a server to run remotely).\e[0m\r\nType \e[33mhelp\e[0m for commands.\r\n"
+  defp close_term_shell(socket, wid) do
+    case Enum.find(socket.assigns.windows, &(&1.id == wid)) do
+      %{server_id: sid} when not is_nil(sid) ->
+        ServerShell.close(sid, wid, self())
+        assign(socket, :term_shells, Map.delete(socket.assigns.term_shells, wid))
 
-      server ->
-        "\e[1;36mMarsad OS\e[0m · Terminal → \e[32m#{server.username}\e[90m@\e[34m#{server.host}\e[90m:\e[33m#{server.port}\e[0m.\r\nEach line runs as one SSH exec channel. Type \e[33mhelp\e[0m.\r\n"
+      _ ->
+        socket
     end
   end
 
-  defp help_text do
-    "\e[36mCommands:\e[0m any shell line runs on the server · \e[33mclear\e[0m clears · \e[33mhelp\e[0m shows this.\r\n\e[36mShortcuts:\e[0m Ctrl+C cancels · Ctrl+L clears · ↑/↓ history.\r\n\e[2mTip: \e[32mls\e[0m \e[2malways shows colors; use \e[33mls -la --color=always\e[0m for vivid output.\e[0m\r\n"
+  # Local demo line discipline (no server attached).
+  defp demo_input(socket, wid, "\u0003") do
+    append_transcript(socket, wid, "^C\r\n")
   end
 
-  defp with_color(cmd) do
-    # Force --color=always for common tools so xterm shows ANSI colors even without a TTY.
-    cmd
-    |> then(fn c ->
-      trimmed = String.trim(c)
+  defp demo_input(socket, wid, line) do
+    socket = append_transcript(socket, wid, "$ #{line}\r\n")
 
-      cond do
-        trimmed == "ll" ->
-          "ls -la --color=always"
+    case String.trim(line) do
+      "" ->
+        push_output(socket, wid, Terminal.demo_prompt())
 
-        String.starts_with?(trimmed, "ll ") ->
-          String.replace(c, ~r/^\s*ll\b/, "ls -la --color=always", global: false)
+      "clear" ->
+        socket
+        |> assign(:transcripts, Map.put(socket.assigns.transcripts, wid, []))
+        |> push_event("terminal_clear", %{window_id: wid})
+        |> push_output(wid, Terminal.demo_prompt())
 
-        trimmed == "la" ->
-          "ls -A --color=always"
+      "help" ->
+        push_output(socket, wid, Terminal.help_text() <> Terminal.demo_prompt())
 
-        String.starts_with?(trimmed, "la ") ->
-          String.replace(c, ~r/^\s*la\b/, "ls -A --color=always", global: false)
+      "echo " <> rest ->
+        push_output(socket, wid, rest <> "\r\n" <> Terminal.demo_prompt())
 
-        String.contains?(c, "--color=auto") ->
-          String.replace(c, "--color=auto", "--color=always")
+      "cd" <> _ ->
+        push_output(
+          socket,
+          wid,
+          "(demo mode) `cd` — add a server in the Servers app to browse remotely.\r\n" <>
+            Terminal.demo_prompt()
+        )
 
-        Regex.match?(~r/\bls\b/, c) and not String.contains?(c, "--color") ->
-          String.replace(c, ~r/\bls\b/, "ls --color=always", global: false)
-
-        true ->
-          c
-      end
-    end)
-    |> then(fn c ->
-      cond do
-        String.contains?(c, "--color=auto") ->
-          String.replace(c, "--color=auto", "--color=always")
-
-        Regex.match?(~r/\bgrep\b/, c) and not String.contains?(c, "--color") ->
-          String.replace(c, ~r/\bgrep\b/, "grep --color=always")
-
-        true ->
-          c
-      end
-    end)
-    |> then(fn c ->
-      if Regex.match?(~r/\bdiff\b/, c) and not String.contains?(c, "--color") do
-        String.replace(c, ~r/\bdiff\b/, "diff --color=always")
-      else
-        c
-      end
-    end)
+      cmd ->
+        push_output(
+          socket,
+          wid,
+          "(demo mode) `#{cmd}` — add a server in the Servers app to execute remotely.\r\n" <>
+            Terminal.demo_prompt()
+        )
+    end
   end
 
-  defp run_remote(socket, window, wid, cmd) do
-    server = server_for(window, socket.assigns)
+  # Forwards raw bytes to the persistent shell, opening one on demand.
+  defp shell_input(socket, wid, server, data) do
+    pid =
+      case Map.get(socket.assigns.term_shells, wid) do
+        %{pid: pid} when is_pid(pid) -> if Process.alive?(pid), do: pid, else: nil
+        _ -> nil
+      end
 
-    cond do
-      server == nil ->
-        case cmd do
-          "echo " <> rest ->
-            push_output(socket, wid, rest <> "\r\n" <> prompt_for(window, socket.assigns))
-
-          _ ->
-            push_output(
+    if pid do
+      _ = ServerShell.input(server.id, wid, self(), data)
+      socket
+    else
+      case ServerShell.ensure(server.id, wid, self(), 80, 24) do
+        {:ok, new_pid} ->
+          socket =
+            assign(
               socket,
-              wid,
-              "(demo mode — v0.0.1) `#{cmd}` — add a server in the Servers app to execute remotely.\r\n" <>
-                prompt_for(window, socket.assigns)
+              :term_shells,
+              Map.put(socket.assigns.term_shells, wid, %{pid: new_pid, open: false})
             )
-        end
 
-      true ->
-        colored_cmd = with_color(cmd)
+          _ = ServerShell.input(server.id, wid, self(), data)
+          socket
 
-        case Fleet.exec(server.id, colored_cmd) do
-          {:ok, %{stdout: out, stderr: err, status: status}} ->
-            suffix = if status not in [0, nil], do: "[exit #{status}]\r\n", else: ""
-            push_output(socket, wid, out <> err <> suffix <> prompt_for(window, socket.assigns))
-
-          {:error, reason} ->
-            push_output(
-              socket,
-              wid,
-              "✖ error: #{inspect(reason)}\r\n" <> prompt_for(window, socket.assigns)
-            )
-        end
+        {:error, reason} ->
+          push_output(
+            socket,
+            wid,
+            "✖ cannot open shell: #{inspect(reason)}\r\n[press Enter to retry]\r\n"
+          )
+      end
     end
   end
+
+  defp to_pos_int(value, default) do
+    case Integer.parse(to_string(value || "")) do
+      {n, _} when n > 0 -> n
+      _ -> default
+    end
+  end
+
+  # Streaming transcripts are capped by bytes (a vim session scrolls fast).
+  @transcript_byte_cap 100_000
+  @transcript_chunk_cap 1000
 
   defp append_transcript(socket, wid, chunk) do
-    transcripts =
-      Map.update(socket.assigns.transcripts, wid, [chunk], fn lines ->
-        Enum.take(lines ++ [chunk], -@transcript_limit)
+    chunks = Map.get(socket.assigns.transcripts, wid, []) ++ [chunk]
+
+    assign(
+      socket,
+      :transcripts,
+      Map.put(socket.assigns.transcripts, wid, trim_transcript(chunks))
+    )
+  end
+
+  defp trim_transcript(chunks) do
+    {kept, _} =
+      chunks
+      |> Enum.reverse()
+      |> Enum.reduce_while({[], 0}, fn chunk, {acc, bytes} ->
+        bytes = bytes + byte_size(chunk)
+
+        if bytes > @transcript_byte_cap or length(acc) >= @transcript_chunk_cap do
+          {:halt, {acc, bytes}}
+        else
+          {:cont, {[chunk | acc], bytes}}
+        end
       end)
 
-    assign(socket, :transcripts, transcripts)
+    kept
   end
 
   defp push_output(socket, wid, chunk) do
@@ -1994,6 +2253,17 @@ defmodule MarsadWeb.DesktopLive do
           <span class="ml-auto hidden items-center gap-2 text-xs text-base-content/60 md:flex">
             <.icon name="hero-lock-closed" class="size-3.5 text-emerald-500" />
             <span class="font-mono">SSH fleet manager</span>
+            <span :if={assigns[:current_admin]} class="font-mono text-base-content/50">
+              · {@current_admin.username}
+            </span>
+            <a
+              href="/logout"
+              id="topbar-logout"
+              title="Sign out"
+              class="rounded-lg border border-base-content/15 p-1.5 hover:bg-base-content/10"
+            >
+              <.icon name="hero-arrow-right-start-on-rectangle" class="size-3.5" />
+            </a>
           </span>
         </div>
 
@@ -2129,14 +2399,27 @@ defmodule MarsadWeb.DesktopLive do
                       >
                         <.icon name="hero-clipboard-document" class="size-3.5" /> Copy
                       </button>
-                      <.window_peer_pill window={w} servers={@servers} />
+                      <button
+                        id={"termclear-#{w.id}"}
+                        phx-click="terminal_clear_window"
+                        phx-value-window={w.id}
+                        title="Clear the screen"
+                        class="flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-base-content/10 hover:text-base-content"
+                      >
+                        <.icon name="hero-trash" class="size-3.5" /> Clear
+                      </button>
+                      <.window_peer_pill
+                        window={w}
+                        servers={@servers}
+                        state={term_shell_state(@term_shells, w.id)}
+                      />
                     </div>
                     <div
                       id={"terminal-#{w.id}"}
                       phx-hook="XtermTerminal"
                       phx-update="ignore"
                       data-window-id={w.id}
-                      data-prompt={prompt_for(w, assigns)}
+                      data-prompt={Terminal.demo_prompt()}
                       data-theme-mode={@appearance.mode}
                       class="marsad-terminal-wrap min-h-[280px] w-full flex-1"
                     />
@@ -2149,7 +2432,12 @@ defmodule MarsadWeb.DesktopLive do
                       editing={@editing_server != nil}
                     />
                   <% w.app == "settings" -> %>
-                    <.settings_app appearance={@appearance} />
+                    <.settings_app
+                      appearance={@appearance}
+                      password_form={@password_form}
+                      password_msg={@password_msg}
+                      current_admin={@current_admin}
+                    />
                   <% w.app == "docker" -> %>
                     <DockerPanel.panel
                       servers={@servers}
@@ -2196,6 +2484,7 @@ defmodule MarsadWeb.DesktopLive do
                       browser={@file_browser}
                       files_filter={@files_filter}
                       files_search_results={@files_search_results}
+                      search_truncated={@files_search_truncated}
                       mkdir_form={@mkdir_form}
                       uploads={@uploads}
                       appearance={@appearance}
@@ -2300,17 +2589,25 @@ defmodule MarsadWeb.DesktopLive do
 
   attr :window, :map, required: true
   attr :servers, :list, required: true
+  attr :state, :atom, required: false, default: :dead
 
   defp window_peer_pill(%{window: %{app: "terminal"}} = assigns) do
     ~H"""
     <%= if server = terminal_server(@window, @servers) do %>
-      <span class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium st-online">
-        <.icon name="hero-signal" class="size-3" />
-        <span class="font-mono">SSH · {server.host}:{server.port}</span>
-      </span>
+      <%= if @state == :connecting do %>
+        <span class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium st-warn">
+          <span class="loading loading-spinner loading-xs" aria-label="Connecting" />
+          <span class="font-mono">SSH · {server.host}:{server.port} · connecting…</span>
+        </span>
+      <% else %>
+        <span class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium st-online">
+          <.icon name="hero-signal" class="size-3" />
+          <span class="font-mono">SSH · {server.host}:{server.port}</span>
+        </span>
+      <% end %>
     <% else %>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium st-warn">
-        <.icon name="hero-beaker" class="size-3" /> local demo — v0.0.1
+        <.icon name="hero-beaker" class="size-3" /> local demo
       </span>
     <% end %>
     """
@@ -2341,6 +2638,9 @@ defmodule MarsadWeb.DesktopLive do
   defp status_style(_), do: {"bg-base-content/30", "text-base-content/50", "Unknown", false}
 
   attr :appearance, :map, required: true
+  attr :password_form, :any, required: false, default: nil
+  attr :password_msg, :any, required: false, default: nil
+  attr :current_admin, :any, required: false, default: nil
 
   defp settings_app(assigns) do
     ~H"""
@@ -2417,6 +2717,72 @@ defmodule MarsadWeb.DesktopLive do
             <span class="text-xs font-medium">{meta.name}</span>
           </button>
         </div>
+      </section>
+
+      <section aria-label="Security" class="rounded-2xl border border-base-content/10 p-4">
+        <h4 class="flex items-center gap-2 text-sm font-bold">
+          <span class="acc-soft flex size-6 items-center justify-center rounded-lg">
+            <.icon name="hero-lock-closed" class="size-3.5" />
+          </span>
+          Security
+        </h4>
+        <p class="mt-1 text-xs text-base-content/60">
+          Signed in as <span class="font-mono font-semibold">{@current_admin && @current_admin.username}</span>.
+          Change the admin password here. Reset deletes the admin so first-time setup runs again.
+        </p>
+
+        <.form
+          for={@password_form}
+          id="password-form"
+          phx-submit="change-password"
+          class="mt-3 space-y-2"
+        >
+          <.input
+            field={@password_form[:password]}
+            type="password"
+            label="New password (min 8)"
+            autocomplete="new-password"
+          />
+          <.input
+            field={@password_form[:confirm]}
+            type="password"
+            label="Confirm new password"
+            autocomplete="new-password"
+          />
+          <p
+            :if={@password_msg}
+            id="password-msg"
+            role="status"
+            class={[
+              "text-xs font-medium",
+              match?({:ok, _}, @password_msg) && "text-emerald-600",
+              match?({:error, _}, @password_msg) && "text-red-500"
+            ]}
+          >
+            {elem(@password_msg, 1)}
+          </p>
+          <div class="flex flex-wrap gap-2">
+            <button type="submit" id="password-submit" class="btn btn-sm acc-bg border-0">
+              Update password
+            </button>
+            <button
+              type="button"
+              id="auth-reset"
+              phx-click="reset-auth"
+              data-confirm="Delete the admin account and go back to setup? You will be signed out."
+              class="btn btn-sm btn-ghost border border-red-500/30 text-red-500"
+            >
+              Reset auth
+            </button>
+            <a
+              href="/logout"
+              id="logout-link"
+              class="btn btn-sm btn-ghost border border-base-content/15"
+            >
+              Sign out
+            </a>
+          </div>
+        </.form>
       </section>
 
       <p class="flex items-center gap-1.5 rounded-xl bg-base-content/[0.04] p-3 text-[11px] leading-relaxed text-base-content/60">

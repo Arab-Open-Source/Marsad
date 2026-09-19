@@ -66,6 +66,23 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
+  vault_key =
+    System.get_env("MARSAD_VAULT_KEY") ||
+      raise """
+      environment variable MARSAD_VAULT_KEY is missing.
+      Generate one with: openssl rand -base64 32
+      Losing this key means losing access to stored SSH credentials.
+      """
+
+  # Validates early: must decode to exactly 32 bytes for AES-256-GCM.
+  case Base.decode64(vault_key) do
+    {:ok, bytes} when byte_size(bytes) == 32 ->
+      config :marsad, :vault_key, vault_key
+
+    _ ->
+      raise "MARSAD_VAULT_KEY must be base64 of 32 bytes (openssl rand -base64 32)"
+  end
+
   config :marsad, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   config :marsad, MarsadWeb.Endpoint,

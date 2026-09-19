@@ -12,9 +12,8 @@ defmodule Marsad.Repo.Retry do
       _ -> retry_settings_after(fun, attempts)
     end
   rescue
-    _ -> retry_settings_after(fun, attempts)
-  catch
-    _, _ -> retry_settings_after(fun, attempts)
+    e in [Ecto.QueryError, DBConnection.ConnectionError, Exqlite.Error] ->
+      if busy_error?(e), do: retry_settings_after(fun, attempts), else: reraise(e, __STACKTRACE__)
   end
 
   defp retry_settings_after(fun, attempts) do
@@ -40,9 +39,8 @@ defmodule Marsad.Repo.Retry do
         other
     end
   rescue
-    e -> if busy_error?(e), do: retry_db_after(fun, attempts), else: {:error, e}
-  catch
-    _, reason -> if busy_error?(reason), do: retry_db_after(fun, attempts), else: {:error, reason}
+    e in [Ecto.QueryError, DBConnection.ConnectionError, Exqlite.Error] ->
+      if busy_error?(e), do: retry_db_after(fun, attempts), else: {:error, e}
   end
 
   defp retry_db_after(fun, attempts) do
@@ -53,13 +51,19 @@ defmodule Marsad.Repo.Retry do
   defp busy_error?(%Exqlite.Error{message: msg}) when is_binary(msg),
     do: String.contains?(msg, "busy") or String.contains?(msg, "locked")
 
+  defp busy_error?(%DBConnection.ConnectionError{message: msg}) when is_binary(msg),
+    do: String.contains?(msg, "busy") or String.contains?(msg, "locked")
+
+  defp busy_error?(%Ecto.QueryError{message: msg}) when is_binary(msg),
+    do: String.contains?(msg, "busy") or String.contains?(msg, "locked")
+
   defp busy_error?(%{message: msg}) when is_binary(msg),
     do: String.contains?(msg, "busy") or String.contains?(msg, "locked")
 
   defp busy_error?(msg) when is_binary(msg),
     do: String.contains?(msg, "busy") or String.contains?(msg, "locked")
 
-  defp busy_error?(other), do: String.contains?(inspect(other), "busy")
+  defp busy_error?(_), do: false
 
   # Helper for Fleet.Server changeset fallback
   def busy_changeset do

@@ -35,4 +35,16 @@ defmodule MarsadWeb.ConnCase do
     Marsad.DataCase.setup_sandbox(tags)
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
+
+  @doc "Creates an admin and returns a conn with its session (for authenticated routes)."
+  def log_in_admin(conn) do
+    username = "admin-#{System.unique_integer([:positive])}"
+
+    {:ok, admin} =
+      Marsad.Accounts.register_admin(%{"username" => username, "password" => "password1234"})
+
+    conn
+    |> Plug.Test.init_test_session(%{})
+    |> Plug.Conn.put_session(:admin_id, admin.id)
+  end
 end

@@ -12,13 +12,14 @@ defmodule Marsad.Fleet.ServerSession do
 
   require Logger
 
-  alias Marsad.Fleet
+  alias Marsad.Fleet.CredentialVault
+  alias Marsad.Fleet.Server
   alias Marsad.SSH.SshAdapter
 
   @exec_timeout 30_000
   @sftp_timeout 45_000
 
-  def start_link(%Fleet.Server{id: id} = server) do
+  def start_link(%Server{id: id} = server) do
     GenServer.start_link(__MODULE__, server, name: via(id))
   end
 
@@ -43,7 +44,7 @@ defmodule Marsad.Fleet.ServerSession do
   end
 
   @impl true
-  def init(%Fleet.Server{} = server) do
+  def init(%Server{} = server) do
     {:ok, %{server: server, conn: nil, fingerprint: nil, failures: 0}}
   end
 
@@ -103,7 +104,7 @@ defmodule Marsad.Fleet.ServerSession do
   end
 
   defp connect(%{server: server} = state) do
-    with {:ok, secret} <- Fleet.open_secret(server),
+    with {:ok, secret} <- open_secret(server),
          {:ok, conn} <-
            SshAdapter.connect(%{
              host: server.host,
@@ -120,12 +121,13 @@ defmodule Marsad.Fleet.ServerSession do
 
       # Best-effort telemetry: a failed status write must never break the
       # connection itself (e.g. Repo unreachable from this process).
+      # NOTE: writes directly via Repo (not via Fleet) to avoid a
+      # Fleet <-> ServerSession xref cycle.
       try do
-        Fleet.mark_seen(server, fingerprint)
+        mark_seen(server, fingerprint)
       rescue
-        e -> Logger.warning("ServerSession mark_seen failed: #{inspect(e)}")
-      catch
-        _, reason -> Logger.warning("ServerSession mark_seen failed: #{inspect(reason)}")
+        e in [Ecto.QueryError, DBConnection.ConnectionError, Exqlite.Error] ->
+          Logger.warning("ServerSession mark_seen failed: #{inspect(e)}")
       end
 
       {:ok, %{state | conn: conn, fingerprint: fingerprint, failures: 0}}
@@ -133,6 +135,19 @@ defmodule Marsad.Fleet.ServerSession do
       :error -> {:error, :cannot_decrypt_secret}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp open_secret(%Server{secret_encrypted: nil}), do: {:ok, nil}
+  defp open_secret(%Server{secret_encrypted: sealed}), do: CredentialVault.open(sealed)
+
+  defp mark_seen(%Server{} = server, fingerprint) do
+    server
+    |> Server.changeset(%{
+      status: "online",
+      last_seen_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      host_fingerprint: fingerprint || server.host_fingerprint
+    })
+    |> Marsad.Repo.update()
   end
 
   @impl true

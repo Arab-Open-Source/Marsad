@@ -5,12 +5,14 @@ import { FitAddon } from "@xterm/addon-fit";
  * XtermTerminal hook — LiveView <-> xterm.js bridge.
  *
  * Server -> client: push_event("terminal_output", %{data: binary})
- * Client -> server: pushEvent("terminal_input", %{data: binary}) on Enter,
+ * Client -> server: pushEvent("terminal_input", %{data: binary}) raw,
  *   plus pushEvent("terminal_resize", %{cols, rows}) on fit.
  *
- * The hook keeps a local line buffer so typing, arrows and backspace feel
- * like a real desktop terminal even though each submitted line is executed
- * remotely over SSH (one exec channel per line in the MVP backend).
+ * Two disciplines, chosen by the server via push_event("terminal_mode"):
+ *  - "shell": raw passthrough to a persistent remote PTY — the server owns
+ *    echo, history and job control, so vim/nano/top all work.
+ *  - "demo": local line buffer (typing, arrows, backspace) for windows
+ *    without a server; each submitted line is answered locally.
  *
  * Selection improvements (v2):
  *  - xterm.css is now bundled via app.css (vendor/xterm.css) so selection
@@ -78,6 +80,9 @@ export const XtermTerminal = {
     this.historyIndex = -1;
     this.prompt = this.el.dataset.prompt || "$ ";
     this.windowId = this.el.dataset.windowId;
+    // Shell mode: raw passthrough to a persistent remote PTY (vim/top work).
+    // Demo mode keeps the local line discipline below.
+    this.shellMode = false;
 
     this.term = new Terminal({
       cursorBlink: true,
@@ -133,8 +138,26 @@ export const XtermTerminal = {
     this.handleEvent("terminal_theme", ({ mode }) => {
       if (TERMINAL_THEMES[mode]) this.term.options.theme = TERMINAL_THEMES[mode];
     });
+    // Server-declared line discipline: "shell" = raw PTY passthrough,
+    // "demo" = local line editing (no server attached).
+    this.handleEvent("terminal_mode", ({ mode, window_id }) => {
+      if (window_id && window_id !== this.windowId) return;
+      this.shellMode = mode === "shell";
+      if (this.shellMode) {
+        // Abandon any half-typed local line; the remote owns the screen now.
+        this.lineBuffer = "";
+        this.historyIndex = -1;
+      }
+    });
 
-    this.term.onData((data) => this.handleInput(data));
+    this.term.onData((data) => {
+      if (this.shellMode) {
+        // Raw passthrough: the remote PTY owns echo, line editing, history.
+        this.pushEvent("terminal_input", { data, window_id: this.windowId });
+      } else {
+        this.handleInput(data);
+      }
+    });
 
     // Selection-aware keys: with an active selection, Ctrl+C / Ctrl+Shift+C
     // copy instead of cancelling the line; Shift+Insert pastes.
@@ -149,6 +172,28 @@ export const XtermTerminal = {
       const ctrlShiftC = (e.ctrlKey || e.metaKey) && keyC && e.shiftKey;
       const ctrlA = (e.ctrlKey || e.metaKey) && keyA && !e.shiftKey && !e.altKey;
       const ctrlV = (e.ctrlKey || e.metaKey) && keyV && !e.shiftKey && !e.altKey;
+
+      if (this.shellMode) {
+        // In shell mode the remote owns every key: only clipboard shortcuts
+        // are intercepted. Ctrl+C without a selection goes through as SIGINT.
+        if (ctrlShiftC || (ctrlC && this.term.hasSelection())) {
+          this.copySelection();
+          return false;
+        }
+        if (ctrlV) {
+          this.pasteFromClipboard();
+          return false;
+        }
+        if (e.shiftKey && e.key === "Insert") {
+          this.pasteFromClipboard();
+          return false;
+        }
+        if ((e.ctrlKey || e.metaKey) && keyV && e.shiftKey) {
+          this.pasteFromClipboard();
+          return false;
+        }
+        return true;
+      }
 
       if (ctrlShiftC || (ctrlC && this.term.hasSelection())) {
         this.copySelection();
@@ -239,7 +284,12 @@ export const XtermTerminal = {
     }
 
     // Ask the server for the welcome banner + transcript replay.
-    this.pushEvent("terminal_ready", { window_id: this.windowId });
+    // Cols/rows let the server size the remote PTY up front.
+    this.pushEvent("terminal_ready", {
+      window_id: this.windowId,
+      cols: this.term.cols,
+      rows: this.term.rows,
+    });
 
     // Debug/testing handle (selection state, dims). Harmless in production.
     window.__marsadTerms = window.__marsadTerms || {};
@@ -391,7 +441,20 @@ export const XtermTerminal = {
 
   pasteFromClipboard() {
     if (navigator.clipboard && navigator.clipboard.readText) {
-      navigator.clipboard.readText().then((t) => this.injectPaste(t || "")).catch(() => {});
+      navigator.clipboard
+        .readText()
+        .then((t) => {
+          if (this.shellMode) {
+            // Raw paste: newlines become carriage returns for the remote.
+            this.pushEvent("terminal_input", {
+              data: String(t || "").replace(/\r\n?/g, "\r"),
+              window_id: this.windowId,
+            });
+          } else {
+            this.injectPaste(t || "");
+          }
+        })
+        .catch(() => {});
     }
     this.term.focus();
   },

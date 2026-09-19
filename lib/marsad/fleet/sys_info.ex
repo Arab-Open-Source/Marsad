@@ -27,17 +27,103 @@ defmodule Marsad.Fleet.SysInfo do
           taken_at: DateTime.t()
         }
 
-  @doc "Fetches one snapshot. Returns `{:ok, snapshot}` or `{:error, reason}`."
+  @cores_cmd "nproc --all 2>/dev/null; nproc 2>/dev/null; grep -c '^processor' /proc/cpuinfo 2>/dev/null; grep -c processor /proc/cpuinfo 2>/dev/null; getconf _NPROCESSORS_ONLN 2>/dev/null; getconf _NPROCESSORS_CONF 2>/dev/null; lscpu 2>/dev/null | awk '/^CPU\\(s\\):/ {print $2}'; lscpu -p 2>/dev/null | grep -v '^#' | wc -l 2>/dev/null; ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l; cat /proc/stat 2>/dev/null | grep -c \"^cpu[0-9]\"; echo 1"
+
+  @doc """
+  Fetches one snapshot. Returns `{:ok, snapshot}` or `{:error, reason}`.
+
+  Uses a single SSH round-trip with section markers (7x fewer round-trips
+  than the legacy path). Falls back to the legacy multi-exec path when the
+  batched output cannot be split (unusual shells).
+  """
   @spec fetch(pos_integer()) :: {:ok, snapshot()} | {:error, term()}
   def fetch(server_id) do
+    case Fleet.exec(server_id, batched_command(), 30_000) do
+      {:ok, %{stdout: out}} when is_binary(out) ->
+        case parse_batched(out) do
+          {:ok, sections} -> assemble(sections)
+          {:error, _} -> fetch_legacy(server_id)
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc "The single-shot shell command with `__MARSAD_*__` section markers."
+  def batched_command do
+    """
+    echo __MARSAD_LOAD__; cat /proc/loadavg; \
+    echo __MARSAD_CORES__; #{@cores_cmd}; \
+    echo __MARSAD_MEM__; free -m; \
+    echo __MARSAD_DFALL__; df -m 2>/dev/null | head -20; \
+    echo __MARSAD_DF__; df -m /; \
+    echo __MARSAD_NET__; cat /proc/net/dev 2>/dev/null || echo ''; \
+    echo __MARSAD_MISC__; uptime -p; hostname; uname -r; echo __MARSAD_END__\
+    """
+  end
+
+  @doc """
+  Splits batched output into `%{load, cores, mem, disk_all, disk, net, misc}`.
+  Pure — unit tested.
+  """
+  def parse_batched(out) when is_binary(out) do
+    markers = ["LOAD", "CORES", "MEM", "DFALL", "DF", "NET", "MISC"]
+
+    pattern =
+      markers
+      |> Enum.map(&"__MARSAD_#{&1}__")
+      |> Enum.join("|")
+
+    parts = String.split(out, ~r/#{pattern}/, trim: true)
+
+    case parts do
+      [load, cores, mem, disk_all, disk, net, misc | _] ->
+        misc = String.replace(misc, "__MARSAD_END__", "")
+
+        {:ok,
+         %{
+           load: load,
+           cores: cores,
+           mem: mem,
+           disk_all: disk_all,
+           disk: disk,
+           net: net,
+           misc: misc
+         }}
+
+      _ ->
+        {:error, :unparseable_batch}
+    end
+  end
+
+  defp assemble(%{
+         load: load,
+         cores: cores,
+         mem: mem,
+         disk_all: disk_all,
+         disk: disk,
+         net: net,
+         misc: misc
+       }) do
+    with {:ok, parsed} <- parse(load, cores, mem, disk, misc) do
+      disks = parse_disks(disk_all)
+      net_stats = parse_net(net)
+
+      {:ok,
+       parsed
+       |> Map.put(:taken_at, DateTime.utc_now())
+       |> Map.put(:cores_raw, String.trim(cores))
+       |> Map.put(:disks, disks)
+       |> Map.put(:net_rx_mb, net_stats.rx_mb)
+       |> Map.put(:net_tx_mb, net_stats.tx_mb)}
+    end
+  end
+
+  # Legacy 7-round-trip path (kept as fallback for unusual shells).
+  defp fetch_legacy(server_id) do
     with {:ok, %{stdout: load}} <- Fleet.exec(server_id, "cat /proc/loadavg"),
-         {:ok, %{stdout: cores}} <-
-           Fleet.exec(
-             server_id,
-             # Run ALL sources in one shell and let parse_cores pick the max.
-             # Covers cgroup-limited nproc (3) vs real cpuinfo/lscpu/sysfs (4).
-             "nproc --all 2>/dev/null; nproc 2>/dev/null; grep -c '^processor' /proc/cpuinfo 2>/dev/null; grep -c processor /proc/cpuinfo 2>/dev/null; getconf _NPROCESSORS_ONLN 2>/dev/null; getconf _NPROCESSORS_CONF 2>/dev/null; lscpu 2>/dev/null | awk '/^CPU\\(s\\):/ {print $2}'; lscpu -p 2>/dev/null | grep -v '^#' | wc -l 2>/dev/null; ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l; cat /proc/stat 2>/dev/null | grep -c \"^cpu[0-9]\"; echo 1"
-           ),
+         {:ok, %{stdout: cores}} <- Fleet.exec(server_id, @cores_cmd),
          {:ok, %{stdout: mem}} <- Fleet.exec(server_id, "free -m"),
          {:ok, %{stdout: disk_all}} <- Fleet.exec(server_id, "df -m 2>/dev/null | head -20"),
          {:ok, %{stdout: disk}} <- Fleet.exec(server_id, "df -m /"),

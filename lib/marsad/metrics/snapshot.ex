@@ -3,7 +3,7 @@ defmodule Marsad.Metrics.Snapshot do
   import Ecto.Changeset
 
   schema "metrics_snapshots" do
-    field :server_id, :integer
+    belongs_to :server, Marsad.Fleet.Server
     field :load1, :float
     field :load5, :float
     field :load15, :float
@@ -42,5 +42,6 @@ defmodule Marsad.Metrics.Snapshot do
       :docker_stats
     ])
     |> validate_required([:server_id, :load1, :cores, :mem_total_mb, :mem_used_mb])
+    |> foreign_key_constraint(:server_id)
   end
 end

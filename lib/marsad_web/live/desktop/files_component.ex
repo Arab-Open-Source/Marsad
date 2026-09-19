@@ -8,9 +8,12 @@ defmodule MarsadWeb.Desktop.FilesComponent do
   attr :browser, :any, required: true
   attr :files_filter, :string, required: true
   attr :files_search_results, :any, required: true
+  attr :search_truncated, :boolean, required: false, default: false
   attr :mkdir_form, :any, required: true
   attr :uploads, :any, required: true
   attr :appearance, :map, required: true
+
+  @search_help "Smart search — words must all match (AND) · \"exact phrase\" · -exclude · ext:conf,json (or *.conf) · type:dirs/files · size:>10M size:<1G · depth:3 · limit:50 · all (include .git/node_modules)"
 
   def files_app(assigns) do
     browser_entries =
@@ -32,7 +35,12 @@ defmodule MarsadWeb.Desktop.FilesComponent do
           local_entries
       end
 
-    assigns = assign(assigns, :display_entries, display_entries)
+    assigns =
+      assigns
+      |> assign(:display_entries, display_entries)
+      |> assign(:search_help, @search_help)
+      |> assign(:filter_tokens, Marsad.Files.query_tokens(assigns.files_filter))
+      |> assign(:filter_chips, Marsad.Files.filter_chips(assigns.files_filter))
 
     ~H"""
     <div id="files-browser" class="flex h-full min-h-0 flex-col lg:flex-row">
@@ -120,40 +128,90 @@ defmodule MarsadWeb.Desktop.FilesComponent do
 
           <!-- Entries -->
           <div :if={@browser.entries != nil} id="files-list" class="min-h-0 flex-1 overflow-y-auto">
-            <div class="border-b border-base-content/10 px-4 py-2">
+            <div class="border-b border-base-content/10 bg-base-content/[0.02] px-4 pb-2.5 pt-3">
               <form id="files-filter-form" phx-change="files-filter" role="search">
-                <label class="flex items-center gap-2 rounded-xl border border-base-content/15 bg-base-100 px-3 py-2 shadow-sm transition focus-within:border-[color:var(--marsad-accent)] focus-within:ring-2 focus-within:ring-[color:var(--marsad-accent)]/20">
-                  <.icon name="hero-magnifying-glass" class="size-4 shrink-0 acc-text" />
+                <label
+                  class="group flex items-center gap-2.5 rounded-2xl border border-base-content/15 bg-base-100 py-2 pl-2 pr-2.5 shadow-sm transition-all duration-150 focus-within:border-[color:var(--marsad-accent)] focus-within:shadow-md focus-within:ring-2 focus-within:ring-[color:var(--marsad-accent)]/25 hover:border-base-content/25"
+                  title={@search_help}
+                >
+                  <span class="acc-soft flex size-8 shrink-0 items-center justify-center rounded-xl transition-transform duration-150 group-focus-within:scale-105">
+                    <.icon name="hero-magnifying-glass" class="size-4" />
+                  </span>
                   <input
                     id="files-filter"
                     type="search"
                     name="filter"
                     value={@files_filter}
-                    placeholder="Search all files on this server…"
+                    placeholder="Smart search… ext:conf size:>1M &quot;exact&quot; -skip"
                     phx-debounce="600"
                     autocomplete="off"
-                    class="min-w-0 grow bg-transparent outline-none"
+                    spellcheck="false"
+                    class="min-w-0 grow bg-transparent text-sm outline-none placeholder:text-base-content/35"
                     aria-label="Search files and folders"
                   />
                   <span
                     :if={@files_search_results == :loading}
-                    class="loading loading-spinner loading-xs"
+                    class="loading loading-spinner loading-xs shrink-0"
                   />
-                  <span :if={is_list(@files_search_results)} class="text-[10px] text-base-content/50">
-                    {length(@display_entries)} results
-                  </span>
                   <button
                     :if={@files_filter != ""}
                     type="button"
                     phx-click="files-clear-filter"
-                    class="rounded p-0.5 text-base-content/40 hover:bg-base-content/10 hover:text-base-content"
+                    class="flex shrink-0 items-center gap-1 rounded-full bg-base-content/10 px-2 py-1 text-[11px] font-medium text-base-content/60 transition hover:bg-base-content/20 hover:text-base-content"
                     title="Clear search"
                     aria-label="Clear search"
                   >
-                    <.icon name="hero-x-mark" class="size-3.5" />
+                    <.icon name="hero-x-mark" class="size-3" /> Clear
                   </button>
                 </label>
               </form>
+              <%!-- Active filter chips (click × to drop one token) --%>
+              <div
+                :if={@filter_tokens != []}
+                class="mt-2 flex flex-wrap items-center gap-1.5"
+                role="group"
+                aria-label="Active search filters"
+              >
+                <%= for chip <- @filter_chips do %>
+                  <button
+                    type="button"
+                    phx-click="files-drop-token"
+                    phx-value-token={chip.token}
+                    title={"Remove #{chip.token} from the search"}
+                    class={[
+                      "group/chip flex max-w-44 cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[11px] transition hover:shadow-sm",
+                      chip.class
+                    ]}
+                  >
+                    <span class="truncate">{chip.token}</span>
+                    <.icon
+                      name="hero-x-mark"
+                      class="size-3 shrink-0 opacity-50 transition group-hover/chip:opacity-100"
+                    />
+                  </button>
+                <% end %>
+              </div>
+              <%!-- Result meta: count, scope, truncation --%>
+              <div class="mt-1.5 flex min-h-4 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-base-content/50">
+                <span :if={@files_search_results == :loading} class="flex items-center gap-1.5">
+                  <span class="marsad-shimmer h-2.5 w-24 rounded-full" /> Searching the server…
+                </span>
+                <span :if={is_list(@files_search_results)} class="font-medium text-base-content/70">
+                  {length(@display_entries)} {if length(@display_entries) == 1,
+                    do: "result",
+                    else: "results"}
+                </span>
+                <span
+                  :if={is_list(@files_search_results) and @search_truncated}
+                  title="More than the shown results matched — refine the query (ext:, size:, -word) or raise limit:N"
+                  class="rounded-full bg-amber-500/15 px-2 py-px font-semibold text-amber-700 dark:text-amber-300"
+                >
+                  showing first {length(@display_entries)} — truncated
+                </span>
+                <span :if={is_list(@files_search_results)} class="ml-auto hidden sm:inline">
+                  recursive · .git & node_modules skipped
+                </span>
+              </div>
             </div>
             <!-- Column headers -->
             <div class="sticky top-0 z-10 flex items-center gap-3 border-b border-base-content/10 bg-base-100 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-base-content/40">
@@ -182,7 +240,16 @@ defmodule MarsadWeb.Desktop.FilesComponent do
                   class="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left"
                 >
                   <.icon name="hero-folder" class="size-4 shrink-0 acc-text" />
-                  <span class="truncate font-medium">{e.name}</span>
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate font-medium">{e.name}</span>
+                    <span
+                      :if={Map.has_key?(e, :path)}
+                      class="block truncate font-mono text-[10px] text-base-content/40"
+                      title={e.path}
+                    >
+                      {e.path}
+                    </span>
+                  </span>
                 </button>
               <% else %>
                 <button
@@ -193,7 +260,16 @@ defmodule MarsadWeb.Desktop.FilesComponent do
                   class="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left"
                 >
                   <.icon name="hero-document" class="size-4 shrink-0 text-base-content/40" />
-                  <span class="truncate">{e.name}</span>
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate">{e.name}</span>
+                    <span
+                      :if={Map.has_key?(e, :path)}
+                      class="block truncate font-mono text-[10px] text-base-content/40"
+                      title={e.path}
+                    >
+                      {e.path}
+                    </span>
+                  </span>
                 </button>
               <% end %>
               <span class="hidden w-16 shrink-0 text-right font-mono text-[11px] text-base-content/50 sm:block">
@@ -410,18 +486,12 @@ defmodule MarsadWeb.Desktop.FilesComponent do
               class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-base-content/[0.02] p-4"
               id="files-image-preview"
             >
-              <%= if @browser.preview.inline? do %>
-                <div class="max-h-full max-w-full" id="files-svg-preview" phx-no-curly-interpolation>
-                  {@browser.preview.data}
-                </div>
-              <% else %>
-                <img
-                  src={"data:#{@browser.preview.mime};base64,#{@browser.preview.data}"}
-                  alt={@browser.preview.path}
-                  class="max-h-full max-w-full rounded-lg border border-base-content/10 object-contain shadow-lg"
-                  loading="lazy"
-                />
-              <% end %>
+              <img
+                src={"data:#{@browser.preview.mime};base64,#{@browser.preview.data}"}
+                alt={@browser.preview.path}
+                class="max-h-full max-w-full rounded-lg border border-base-content/10 object-contain shadow-lg"
+                loading="lazy"
+              />
             </div>
           <% :text -> %>
             <div class="marsad-code-editor-wrap min-h-0 flex-1" id="files-code-preview">

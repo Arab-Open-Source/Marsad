@@ -66,8 +66,11 @@ defmodule Marsad.Helpers.Text do
     String.replace(name, "\"", "_")
   end
 
-  def upload_error_to_string(:too_large), do: "Too large (max 1GB)"
-  def upload_error_to_string(:too_many_files), do: "Too many files (max 10)"
+  def upload_error_to_string(:too_large), do: "Too large (max 50MB per file)"
+
+  def upload_error_to_string(:too_many_files),
+    do: "Too many files (max 3 files / 20 folder entries)"
+
   def upload_error_to_string(:not_accepted), do: "File type not accepted"
   def upload_error_to_string(other), do: inspect(other)
 end

@@ -14,10 +14,39 @@ defmodule MarsadWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :require_admin do
+    plug MarsadWeb.Plugs.RequireAdmin
+  end
+
+  # Public: offline diagnostics (no auth on purpose).
   scope "/", MarsadWeb do
     pipe_through :browser
 
-    live "/", DesktopLive, :index
+    live_session :public do
+      live "/offline", OfflineLive, :index
+    end
+  end
+
+  # Guest-only: setup + login (plain controllers so session cookies are written reliably).
+  scope "/", MarsadWeb do
+    pipe_through :browser
+
+    get "/setup", AuthController, :setup
+    post "/setup", AuthController, :create_setup
+    get "/login", AuthController, :login
+    post "/login", AuthController, :create_login
+
+    get "/logout", SessionController, :delete
+  end
+
+  # Authenticated app.
+  scope "/", MarsadWeb do
+    pipe_through [:browser, :require_admin]
+
+    live_session :app, on_mount: {MarsadWeb.LiveAuth, :ensure} do
+      live "/", DesktopLive, :index
+    end
+
     get "/files/download", FileDownloadController, :download
   end
 

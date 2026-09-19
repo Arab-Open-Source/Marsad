@@ -38,3 +38,9 @@ config :phoenix_live_view,
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Fast password hashing in tests (PBKDF2 iterations).
+config :marsad, :pbkdf2_iterations, 5_000
+
+# Shell sessions use the in-memory fake transport in tests.
+config :marsad, :shell_transport, Marsad.SSH.FakeShellTransport

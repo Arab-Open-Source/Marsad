@@ -1,5 +1,5 @@
 defmodule Marsad.SettingsTest do
-  use Marsad.DataCase, async: true
+  use Marsad.DataCase, async: false
 
   alias Marsad.Settings
 

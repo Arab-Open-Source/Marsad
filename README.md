@@ -38,8 +38,8 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 
 ### Integrated Terminal
 - xterm.js-powered SSH terminal emulator
-- One exec channel per submitted line
-- Command transcript history per terminal window
+- One persistent PTY shell per terminal window — a real interactive shell, so `vim`, `nano`, `top`, `cd`, pipes and job control all work natively
+- Live resize propagation, scrollback transcript replay per window, copy/paste friendly
 
 ### SFTP File Explorer
 - Remote directory browsing with breadcrumb navigation

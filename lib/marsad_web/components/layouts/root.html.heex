@@ -40,5 +40,53 @@
   </head>
   <body>
     {@inner_content}
+
+    <%!-- Global offline / limited-connection overlay (public, no auth needed). --%>
+    <div
+      id="global-offline-overlay"
+      phx-hook="ConnectionStatus"
+      style="display: none;"
+      class="fixed inset-0 z-[9999] items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm"
+      role="alert"
+      aria-live="assertive"
+    >
+      <div class="w-full max-w-md rounded-3xl border border-amber-500/30 bg-slate-900 p-8 text-center shadow-2xl">
+        <span class="mx-auto flex size-14 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-400">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke-width="1.5"
+            stroke="currentColor"
+            class="size-7"
+          ><path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M12 9v3.75m0 3.75h.008v.008H12v-.008ZM9.568 3.641a8.484 8.484 0 0 1 4.864 0M8.023 6.41a7.5 7.5 0 0 1 7.954 0M5.337 9.433a6 6 0 0 1 9.326 0M3 12.75a9 9 0 0 1 13.5-3.375M3 12.75 3.375 12m-.375.75h.008v.008H3v-.008Zm13.125 0h.008v.008h-.008v-.008Z"
+          /></svg>
+        </span>
+        <p class="mt-3 text-xs font-semibold uppercase tracking-wider text-amber-400">
+          Limited or no internet
+        </p>
+        <h2 class="mt-1 text-xl font-bold text-white">Connection lost</h2>
+        <p id="global-offline-detail" class="mt-2 text-sm leading-relaxed text-slate-400">
+          Lost connection to the Marsad server. Retrying…
+        </p>
+        <div class="mt-5 flex justify-center gap-2">
+          <button
+            onclick="window.location.reload()"
+            class="rounded-lg bg-amber-500 px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-400"
+          >
+            Retry now
+          </button>
+          <a
+            href="/offline"
+            class="rounded-lg border border-slate-700 px-5 py-2.5 text-sm font-medium text-slate-200 hover:bg-slate-800"
+          >
+            Details
+          </a>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

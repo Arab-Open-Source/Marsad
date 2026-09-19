@@ -1,5 +1,5 @@
 defmodule MarsadWeb.FileSearchSaveTest do
-  use MarsadWeb.ConnCase, async: true
+  use MarsadWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
@@ -21,9 +21,57 @@ defmodule MarsadWeb.FileSearchSaveTest do
         secret: "x"
       })
 
-    stub = start_supervised!({FileSessionStub, server_id: server.id, owner: self()})
+    # Registry is global (not sandboxed): kill any stale session/stub from a
+    # rolled-back test (ids restart at 1 per test) and wait for unregister.
+    case Registry.lookup(Marsad.Fleet.Registry, server.id) do
+      [{pid, _}] ->
+        DynamicSupervisor.terminate_child(Marsad.Fleet.DynamicSupervisor, pid)
+
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1000)
+        catch
+          :exit, _ -> :ok
+        end
+
+      [] ->
+        :ok
+    end
+
+    wait_registry_free(server.id)
+
+    stub =
+      case start_supervised({FileSessionStub, server_id: server.id, owner: self()}) do
+        {:ok, pid} ->
+          pid
+
+        {:error, {:already_started, pid}} ->
+          # Stale entry won the race: take it over by restarting it under this test.
+          try do
+            if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1000)
+          catch
+            :exit, _ -> :ok
+          end
+
+          wait_registry_free(server.id)
+          start_supervised!({FileSessionStub, server_id: server.id, owner: self()})
+      end
 
     %{server: server, stub: stub}
+  end
+
+  defp wait_registry_free(server_id, deadline \\ System.monotonic_time(:millisecond) + 2000) do
+    case Registry.lookup(Marsad.Fleet.Registry, server_id) do
+      [] ->
+        :ok
+
+      _ ->
+        if System.monotonic_time(:millisecond) > deadline do
+          :ok
+        else
+          Process.sleep(20)
+          wait_registry_free(server_id, deadline)
+        end
+    end
   end
 
   defp enqueue(stub, replies), do: Enum.each(replies, &FileSessionStub.enqueue(stub, &1))
@@ -49,6 +97,7 @@ defmodule MarsadWeb.FileSearchSaveTest do
     conn: conn,
     stub: stub
   } do
+    conn = MarsadWeb.ConnCase.log_in_admin(conn)
     {:ok, view, _html} = live(conn, ~p"/")
 
     # Initial directory listing (home_dir + list_dir consumed by the load task).

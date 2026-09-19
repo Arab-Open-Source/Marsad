@@ -154,20 +154,28 @@ defmodule Marsad.Fleet.Services do
   @doc "Logs an audit entry (best-effort, never fails the caller)."
   @spec audit(pos_integer(), binary(), binary(), binary()) :: :ok
   def audit(server_id, action, container, details \\ "") do
-    try do
-      Marsad.Repo.insert(%Marsad.AuditLog{
-        server_id: server_id,
-        action: action,
-        container: container,
-        details: details
-      })
-    rescue
-      _ -> :ok
-    catch
-      _, _ -> :ok
-    end
+    %Marsad.AuditLog{}
+    |> Marsad.AuditLog.changeset(%{
+      server_id: server_id,
+      action: action,
+      container: container,
+      details: details
+    })
+    |> Marsad.Repo.insert()
+    |> case do
+      {:ok, _} ->
+        :ok
 
-    :ok
+      {:error, changeset} ->
+        require Logger
+        Logger.warning("audit insert failed: #{inspect(changeset.errors)}")
+        :ok
+    end
+  rescue
+    e in [Ecto.QueryError, DBConnection.ConnectionError, Exqlite.Error] ->
+      require Logger
+      Logger.warning("audit insert failed: #{inspect(e)}")
+      :ok
   end
 
   # -- systemd ----------------------------------------------------------------
