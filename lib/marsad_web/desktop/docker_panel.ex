@@ -1,6 +1,9 @@
 defmodule MarsadWeb.Desktop.DockerPanel do
   @moduledoc "Docker containers panel (function component; events live in DesktopLive)."
   use MarsadWeb, :html
+  import MarsadWeb.Components.StatusBadge
+  import MarsadWeb.Components.EmptyState
+  import MarsadWeb.Components.LoadingState
 
   attr :servers, :list, required: true
   attr :state, :map, required: true
@@ -73,17 +76,12 @@ defmodule MarsadWeb.Desktop.DockerPanel do
         </span>
       </div>
 
-      <div
+      <.empty_state
         :if={!@state.server_id}
-        id="docker-empty"
-        class="flex flex-1 items-center justify-center p-8 text-center"
-      >
-        <div>
-          <.icon name="hero-cube" class="mx-auto size-10 text-base-content/30" />
-          <p class="mt-2 font-semibold">No server selected</p>
-          <p class="text-sm text-base-content/60">Pick a server above to manage Docker containers.</p>
-        </div>
-      </div>
+        icon="hero-cube"
+        title="No server selected"
+        description="Pick a server above to manage Docker containers."
+      />
 
       <%= if @state.server_id do %>
         <%!-- Tab strip --%>
@@ -207,13 +205,7 @@ defmodule MarsadWeb.Desktop.DockerPanel do
 
       <%= case @state.data do %>
         <% nil -> %>
-          <div class="space-y-0 p-2" aria-label="Loading containers">
-            <div :for={_ <- 1..5} class="flex items-center gap-3 px-2 py-2.5">
-              <span class="marsad-shimmer size-4 rounded" />
-              <span class="marsad-shimmer h-3.5 rounded" style="width: 28%" />
-              <span class="marsad-shimmer ml-auto h-3 w-16 rounded" />
-            </div>
-          </div>
+          <.skeleton_loader rows={5} class="p-2" />
         <% {:error, :docker_unavailable} -> %>
           <div
             role="alert"
@@ -233,15 +225,20 @@ defmodule MarsadWeb.Desktop.DockerPanel do
           </div>
         <% {:ok, containers} -> %>
           <div id="docker-list" class="min-h-0 flex-1 overflow-y-auto">
-            <p :if={containers == []} class="p-6 text-center text-sm text-base-content/50">
-              No containers on this host.
-            </p>
-            <p
+            <.empty_state
+              :if={containers == []}
+              icon="hero-cube"
+              title="No containers"
+              description="No containers found on this host."
+              class="py-12"
+            />
+            <.empty_state
               :if={containers != [] and @entries == []}
-              class="p-6 text-center text-sm text-base-content/50"
-            >
-              No containers match the filter.
-            </p>
+              icon="hero-funnel"
+              title="No matches"
+              description="No containers match the current filter."
+              class="py-12"
+            />
             <div
               :for={c <- @entries}
               id={"container-#{c.name}"}

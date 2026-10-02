@@ -2225,7 +2225,13 @@ defmodule MarsadWeb.DesktopLive do
             Services.audit(sid, "docker_#{action}", name, "ok")
 
             socket
-            |> put_flash(:info, "Container #{past}.")
+            |> push_event("show-toast", %{
+              id: "toast-#{System.unique_integer([:positive])}",
+              type: "success",
+              title: "Container #{action}",
+              message: "Container #{past} successfully",
+              duration: 3000
+            })
             |> assign_docker(fn d ->
               %{d | busy: nil, action_ref: nil, audit: Services.list_audit(sid)}
             end)
@@ -2235,7 +2241,13 @@ defmodule MarsadWeb.DesktopLive do
             Services.audit(sid, "docker_#{action}", name, "failed: #{inspect(reason)}")
 
             socket
-            |> put_flash(:error, "Docker #{action} failed: #{inspect(reason)}")
+            |> push_event("show-toast", %{
+              id: "toast-#{System.unique_integer([:positive])}",
+              type: "error",
+              title: "Docker #{action} failed",
+              message: inspect(reason),
+              duration: 5000
+            })
             |> assign_docker(fn d -> %{d | busy: nil, action_ref: nil} end)
         end
 
@@ -3809,6 +3821,9 @@ defmodule MarsadWeb.DesktopLive do
           </span>
         </div>
       </div>
+
+      <%!-- Toast container --%>
+      <div id="toast-container" phx-update="ignore"></div>
     </Layouts.app>
     """
   end

@@ -556,3 +556,65 @@ html {
 }
 
 /* This file is for your main application CSS */
+
+@layer base {
+  :root {
+    --toast-duration: 3000;
+    --transition-fast: 150ms;
+    --transition-base: 200ms;
+    --transition-slow: 300ms;
+  }
+
+  * {
+    @apply border-base-300;
+  }
+
+  html,
+  body {
+    @apply h-full antialiased;
+  }
+}
+
+@layer utilities {
+  .animate-slide-up {
+    animation: slide-up 0.2s ease-out;
+  }
+
+  .animate-slide-down {
+    animation: slide-down 0.2s ease-out;
+  }
+
+  @keyframes slide-up {
+    from {
+      transform: translateY(1rem);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes slide-down {
+    from {
+      transform: translateY(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateY(1rem);
+      opacity: 0;
+    }
+  }
+
+  .btn-primary {
+    @apply bg-primary text-primary-content hover:brightness-110 transition-all;
+  }
+
+  .btn-secondary {
+    @apply bg-base-200 text-base-content hover:bg-base-300 transition-all;
+  }
+
+  .btn-ghost {
+    @apply hover:bg-base-200 transition-all;
+  }
+}

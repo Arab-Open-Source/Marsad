@@ -28,12 +28,14 @@ import { XtermTerminal } from "./hooks/terminal"
 import { CodeEditor } from "./hooks/code_editor"
 import { ChartHook } from "./hooks/chart"
 import { ConnectionStatus } from "./hooks/connection_status"
+import { Toast } from "./hooks/toast"
+import { initToastHandler } from "./toast-handler"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, XtermTerminal, CodeEditor, ChartHook, ConnectionStatus},
+  hooks: {...colocatedHooks, XtermTerminal, CodeEditor, ChartHook, ConnectionStatus, Toast},
 })
 
 // Show progress bar on live navigation and form submits
@@ -43,6 +45,9 @@ window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
 // connect if there are any LiveViews on the page
 liveSocket.connect()
+
+// Initialize toast handler
+initToastHandler()
 
 // expose liveSocket on window for web console debug logs and latency simulation:
 // >> liveSocket.enableDebug()
@@ -71,7 +76,7 @@ if (process.env.NODE_ENV === "development") {
     window.addEventListener("keyup", _e => keyDown = null)
     window.addEventListener("click", e => {
       if(keyDown === "c"){
-        e.preventDefault()
+        e.preventDefault() 
         e.stopImmediatePropagation()
         reloader.openEditorAtCaller(e.target)
       } else if(keyDown === "d"){
@@ -84,4 +89,4 @@ if (process.env.NODE_ENV === "development") {
     window.liveReloader = reloader
   })
 }
-
+ 
