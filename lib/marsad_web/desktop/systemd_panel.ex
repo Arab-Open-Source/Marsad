@@ -324,7 +324,8 @@ defmodule MarsadWeb.Desktop.SystemdPanel do
                   </div>
                   <span class={[
                     "hidden shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[10px] font-medium sm:block",
-                    u.active == "active" && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                    u.active == "active" &&
+                      "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
                     u.active == "failed" && "bg-red-500/10 text-red-700 dark:text-red-300",
                     u.active not in ["active", "failed"] && "bg-base-content/10 text-base-content/60"
                   ]}>

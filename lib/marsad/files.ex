@@ -367,7 +367,8 @@ defmodule Marsad.Files do
   end
 
   defp parse_size_bound(value) do
-    with [_, op, num] <- Regex.run(~r/\A(>=|<=|>|<|=)?\s*(\d+(?:\.\d+)?\s*[kKmMgG]?)\s*\z/, value),
+    with [_, op, num] <-
+           Regex.run(~r/\A(>=|<=|>|<|=)?\s*(\d+(?:\.\d+)?\s*[kKmMgG]?)\s*\z/, value),
          n when not is_nil(n) <- parse_size_bytes(num) do
       case op do
         ">" -> {:min, n + 1}
