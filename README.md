@@ -9,6 +9,7 @@ A Phoenix LiveView server fleet management dashboard with a mini-OS desktop inte
 ## Table of Contents
 
 - [Overview](#overview)
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Getting Started](#getting-started)
@@ -25,6 +26,30 @@ A Phoenix LiveView server fleet management dashboard with a mini-OS desktop inte
 Marsad (Arabic for "observatory" or "watchtower") is a self-hosted web application that provides a unified desktop-style interface for managing a fleet of Linux servers over SSH. Rather than juggling multiple terminal sessions, SFTP clients, and monitoring tools, Marsad consolidates these workflows into a single, real-time, browser-based desktop environment.
 
 The application is built with Phoenix LiveView and Elixir, leveraging OTP for concurrent, fault-tolerant SSH session management. Each managed server gets its own supervised GenServer that maintains a persistent SSH connection, enabling instant command execution and file operations without per-request connection overhead.
+
+## Screenshots
+
+> Captured against an isolated demo instance with fictional data. Hostnames, credentials and IP addresses below are placeholders from the RFC 5737 documentation ranges (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`).
+
+**Fleet Overview** — status, resource usage and recent activity across the fleet:
+
+![Fleet Overview](screenshots/01-overview.png)
+
+**Mini-OS desktop** — app dock, window tabs and the Servers panel:
+
+![Desktop with Servers panel](screenshots/04-desktop.png)
+
+**Command Palette** (`Ctrl+K`) — jump to any app, server, page or runbook:
+
+![Command palette](screenshots/05-command-palette.png)
+
+**Activity Timeline** — searchable, filterable audit trail:
+
+![Activity timeline](screenshots/02-activity.png)
+
+**Runbooks** — reusable commands with variables and multi-server execution:
+
+![Runbooks](screenshots/03-runbooks.png)
 
 ## Features
 
