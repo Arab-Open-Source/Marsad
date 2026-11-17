@@ -7,6 +7,31 @@ Last updated: 2026-11-17 · Baseline: v0.10.0
 
 ---
 
+## A — Alerting & Notification Channels — [#7](https://github.com/Arab-Open-Source/Marsad/issues/7)
+
+**Problem.** Marsad shows metrics, SSL expiry and activity, but only reacts when an operator is looking at the page. Teams need proactive detection delivered where they already work.
+
+**Scope**
+- Alert rules on metric thresholds (CPU/RAM/disk), server offline, SSL expiry (warn ≤30d, critical ≤14d), failed runbook runs and pending security updates (feature G).
+- Severity levels, cooldown/dedup to avoid spam, and automatic "resolved" notifications.
+- Persistent in-app notification center with unread state.
+- Notification channels routed per rule:
+  - **Email** via the configured `Swoosh` adapter.
+  - **Telegram** via Bot API (`sendMessage` + chat id).
+  - **WhatsApp** via WhatsApp Business Cloud API (Meta Graph) or Twilio — pluggable provider.
+- Channel management UI with add/edit/test/disable and severity routing.
+- Channel credentials encrypted at rest with `Marsad.Fleet.CredentialVault`, never logged.
+
+**Acceptance criteria**
+- A rule has a condition, severity, cooldown and one or more channels.
+- A trigger fires once per cooldown window and emits "resolved" when the condition clears.
+- Delivery to all enabled channels; a failure in one channel does not block the others.
+- Each of Telegram, email and WhatsApp has a working "send test notification" action.
+- Credentials are encrypted at rest and redacted from logs/UI.
+- Alert history appears in the notification center and Activity Timeline.
+
+---
+
 ## C — Runbook Scheduler — [#1](https://github.com/Arab-Open-Source/Marsad/issues/1)
 
 **Problem.** Runbooks can only be executed manually. Repetitive operational work (nightly backups, daily certificate checks, weekly log cleanup) still needs a human.
@@ -121,8 +146,10 @@ Last updated: 2026-11-17 · Baseline: v0.10.0
 |---|---|---|
 | 1 | **C — Scheduler** | Compounds the Runbooks feature shipped in 0.10.0 |
 | 2 | **G — Security Update Manager** | High security value, read-only, reuses existing exec path |
-| 3 | **A — Alerting + Notification Center** *(separate request)* | Turns monitoring into proactive detection |
+| 3 | **A — Alerting + Channels** ([#7](https://github.com/Arab-Open-Source/Marsad/issues/7)) | Turns monitoring into proactive detection |
 | 4 | **E — Incident Mode** | Needs alerts + Activity Timeline to be most useful |
 | 5 | **F — Session Recording** | Benefits from RBAC + retention policy |
 | 6 | **H — Reports** | Consumes data produced by the earlier features |
 | 7 | **J — RBAC** | Cross-cutting; best designed before F/H expose more data |
+
+> RBAC (J) should be designed before F and H if multiple users will share the instance, since both expose more data and new actions.
