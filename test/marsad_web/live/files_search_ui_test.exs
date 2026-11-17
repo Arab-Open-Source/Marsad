@@ -100,7 +100,7 @@ defmodule MarsadWeb.FilesSearchUiTest do
 
   test "truncated badge appears when results exceed the limit", %{conn: conn, stub: stub} do
     conn = MarsadWeb.ConnCase.log_in_admin(conn)
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_files(view, stub)
 
     enqueue(stub, [
@@ -123,7 +123,7 @@ defmodule MarsadWeb.FilesSearchUiTest do
 
   test "dropping a chip re-runs the search without it", %{conn: conn, stub: stub} do
     conn = MarsadWeb.ConnCase.log_in_admin(conn)
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_files(view, stub)
 
     enqueue(stub, [
@@ -148,7 +148,7 @@ defmodule MarsadWeb.FilesSearchUiTest do
 
   test "remote hits show their full path", %{conn: conn, stub: stub} do
     conn = MarsadWeb.ConnCase.log_in_admin(conn)
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_files(view, stub)
 
     enqueue(stub, [

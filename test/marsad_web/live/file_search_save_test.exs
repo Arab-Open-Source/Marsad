@@ -98,7 +98,7 @@ defmodule MarsadWeb.FileSearchSaveTest do
     stub: stub
   } do
     conn = MarsadWeb.ConnCase.log_in_admin(conn)
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     # Initial directory listing (home_dir + list_dir consumed by the load task).
     enqueue(stub, [

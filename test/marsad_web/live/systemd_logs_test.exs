@@ -91,7 +91,7 @@ defmodule MarsadWeb.SystemdLogsTest do
   end
 
   test "journal opens with count, collapses and wraps", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
 
     enqueue(stub, [exec_reply("cron.service loaded active running Cron daemon\n")])
     view |> element("#icon-systemd") |> render_click()

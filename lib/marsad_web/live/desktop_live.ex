@@ -22,6 +22,7 @@ defmodule MarsadWeb.DesktopLive do
   alias Marsad.Helpers.Text
   alias Marsad.Repo.Retry
   alias Marsad.Settings
+  alias Marsad.Snippets
   alias Marsad.Terminal
   alias MarsadWeb.Desktop.DockerPanel
   alias MarsadWeb.Desktop.FilesComponent
@@ -53,67 +54,84 @@ defmodule MarsadWeb.DesktopLive do
   @min_metrics_interval 5_000
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(params, _session, socket) do
     servers = Fleet.list_servers()
+    linked_server = params["server"] && Enum.find(servers, &("#{&1.id}" == "#{params["server"]}"))
 
     if connected?(socket), do: Process.send_after(self(), :metrics_tick, @metrics_interval)
 
-    {:ok,
-     socket
-     |> assign(:apps, @apps)
-     |> assign(:servers, servers)
-     |> assign(:windows, [])
-     |> assign(:focused_id, nil)
-     |> assign(:active_server_id, active_default(servers))
-     |> assign(:appearance, Settings.appearance())
-     |> assign(:server_form, to_form(Fleet.change_server(%Server{})))
-     |> assign(:show_server_form, false)
-     |> assign(:editing_server, nil)
-     |> assign(:file_browser, nil)
-     |> assign(:files_load_ref, nil)
-     |> assign(:files_pending_preview, nil)
-     |> assign(:files_filter, "")
-     |> assign(:files_search_results, nil)
-     |> assign(:files_search_ref, nil)
-     |> assign(:files_search_truncated, false)
-     |> assign(:mkdir_form, to_form(%{"dirname" => ""}))
-     |> assign(:monitor_server_id, active_default(servers))
-     |> assign(:metrics, %{})
-     |> assign(:metrics_loading, nil)
-     |> assign(:metrics_duration, "24h")
-     |> assign(:metrics_custom_from, nil)
-     |> assign(:metrics_custom_to, nil)
-     |> assign(:metrics_chart_data, %{labels: [], datasets: []})
-     |> assign(:metrics_interval, Settings.metrics_interval())
-     |> assign(:top_procs, %{})
-     |> assign(:top_procs_loading, nil)
-     |> assign(:proc_sort, :cpu)
-     |> assign(:proc_order, :desc)
-     |> assign(:proc_page, 1)
-     |> assign(:proc_per_page, 10)
-     |> assign(:docker, nil)
-     |> assign(:systemd, nil)
-     |> assign(:nginx, nil)
-     |> assign(:nginx_load_ref, nil)
-     |> assign(:password_form, to_form(%{"password" => "", "confirm" => ""}))
-     |> assign(:password_msg, nil)
-     |> assign(:term_shells, %{})
-     |> allow_upload(:remote_files,
-       accept: :any,
-       max_entries: 3,
-       max_file_size: 50_000_000,
-       chunk_size: 64_000,
-       chunk_timeout: 60_000,
-       auto_upload: false
-     )
-     |> allow_upload(:remote_folder,
-       accept: :any,
-       max_entries: 20,
-       max_file_size: 50_000_000,
-       chunk_size: 64_000,
-       chunk_timeout: 60_000,
-       auto_upload: false
-     )}
+    socket =
+      socket
+      |> assign(:apps, @apps)
+      |> assign(:servers, servers)
+      |> assign(:windows, [])
+      |> assign(:focused_id, nil)
+      |> assign(:active_server_id, active_default(servers))
+      |> assign(:appearance, Settings.appearance())
+      |> assign(:server_form, to_form(Fleet.change_server(%Server{})))
+      |> assign(:show_server_form, false)
+      |> assign(:editing_server, nil)
+      |> assign(:file_browser, nil)
+      |> assign(:files_load_ref, nil)
+      |> assign(:files_pending_preview, nil)
+      |> assign(:files_filter, "")
+      |> assign(:files_search_results, nil)
+      |> assign(:files_search_ref, nil)
+      |> assign(:files_search_truncated, false)
+      |> assign(:mkdir_form, to_form(%{"dirname" => ""}))
+      |> assign(:monitor_server_id, active_default(servers))
+      |> assign(:metrics, %{})
+      |> assign(:metrics_loading, nil)
+      |> assign(:metrics_duration, "24h")
+      |> assign(:metrics_custom_from, nil)
+      |> assign(:metrics_custom_to, nil)
+      |> assign(:metrics_chart_data, %{labels: [], datasets: []})
+      |> assign(:metrics_interval, Settings.metrics_interval())
+      |> assign(:top_procs, %{})
+      |> assign(:top_procs_loading, nil)
+      |> assign(:proc_sort, :cpu)
+      |> assign(:proc_order, :desc)
+      |> assign(:proc_page, 1)
+      |> assign(:proc_per_page, 10)
+      |> assign(:docker, nil)
+      |> assign(:systemd, nil)
+      |> assign(:nginx, nil)
+      |> assign(:nginx_load_ref, nil)
+      |> assign(:password_form, to_form(%{"password" => "", "confirm" => ""}))
+      |> assign(:password_msg, nil)
+      |> assign(:term_shells, %{})
+      |> allow_upload(:remote_files,
+        accept: :any,
+        max_entries: 3,
+        max_file_size: 50_000_000,
+        chunk_size: 64_000,
+        chunk_timeout: 60_000,
+        auto_upload: false
+      )
+      |> allow_upload(:remote_folder,
+        accept: :any,
+        max_entries: 20,
+        max_file_size: 50_000_000,
+        chunk_size: 64_000,
+        chunk_timeout: 60_000,
+        auto_upload: false
+      )
+      |> assign(:palette_open, false)
+      |> assign(:palette_query, "")
+      |> assign(:snippets, Snippets.list_snippets())
+      |> assign(:palette_results, [])
+
+    socket =
+      if linked_server, do: assign(socket, :active_server_id, linked_server.id), else: socket
+
+    socket =
+      case params["open"] do
+        "terminal" -> open_app(socket, "terminal")
+        app when is_binary(app) -> open_app(socket, app)
+        _ -> socket
+      end
+
+    {:ok, socket}
   end
 
   @impl true
@@ -123,30 +141,50 @@ defmodule MarsadWeb.DesktopLive do
   end
 
   def handle_event("open-app", %{"app" => app}, socket) do
-    socket =
-      case app do
-        "files" ->
-          ensure_browser(socket)
+    {:noreply, open_app(socket, app)}
+  end
 
-        "monitor" ->
-          socket
-          |> fetch_metrics_async(socket.assigns.monitor_server_id)
-          |> fetch_top_procs_async(socket.assigns.monitor_server_id)
+  def handle_event("palette-open", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:palette_open, true)
+     |> assign(:palette_query, "")
+     |> assign(
+       :palette_results,
+       palette_results("", socket.assigns.apps, socket.assigns.servers, socket.assigns.snippets)
+     )}
+  end
 
-        "docker" ->
-          ensure_docker(socket)
+  def handle_event("palette-close", _params, socket) do
+    {:noreply, assign(socket, :palette_open, false)}
+  end
 
-        "systemd" ->
-          ensure_systemd(socket)
+  def handle_event("palette-query", %{"query" => query}, socket) do
+    {:noreply,
+     socket
+     |> assign(:palette_query, query)
+     |> assign(
+       :palette_results,
+       palette_results(
+         query,
+         socket.assigns.apps,
+         socket.assigns.servers,
+         socket.assigns.snippets
+       )
+     )}
+  end
 
-        "nginx" ->
-          ensure_nginx(socket)
+  def handle_event("palette-select", %{"kind" => kind, "id" => id}, socket) do
+    socket = assign(socket, :palette_open, false)
 
-        _ ->
-          socket
-      end
-
-    {:noreply, open_window(socket, app, app, nil)}
+    {:noreply,
+     case kind do
+       "app" -> open_app(socket, id)
+       "server" -> open_app(assign(socket, :active_server_id, String.to_integer(id)), "terminal")
+       "page" -> push_navigate(socket, to: id)
+       "snippet" -> push_navigate(socket, to: "/snippets?run=" <> id)
+       _ -> socket
+     end}
   end
 
   def handle_event("switch-tab", %{"id" => id}, socket) do
@@ -3324,6 +3362,96 @@ defmodule MarsadWeb.DesktopLive do
   defp terminal_window_id(%{assigns: %{active_server_id: nil}}), do: "terminal"
   defp terminal_window_id(%{assigns: %{active_server_id: id}}), do: "terminal-#{id}"
 
+  defp open_app(socket, "terminal") do
+    open_window(socket, terminal_window_id(socket), "terminal", socket.assigns.active_server_id)
+  end
+
+  defp open_app(socket, app) do
+    socket =
+      case app do
+        "files" ->
+          ensure_browser(socket)
+
+        "monitor" ->
+          socket
+          |> fetch_metrics_async(socket.assigns.monitor_server_id)
+          |> fetch_top_procs_async(socket.assigns.monitor_server_id)
+
+        "docker" ->
+          ensure_docker(socket)
+
+        "systemd" ->
+          ensure_systemd(socket)
+
+        "nginx" ->
+          ensure_nginx(socket)
+
+        _ ->
+          socket
+      end
+
+    open_window(socket, app, app, nil)
+  end
+
+  defp palette_results(query, apps, servers, snippets) do
+    pages = [
+      %{
+        kind: "page",
+        id: "/overview",
+        title: "Fleet Overview",
+        subtitle: "Open the status dashboard",
+        icon: "hero-chart-bar"
+      },
+      %{
+        kind: "page",
+        id: "/activity",
+        title: "Activity Timeline",
+        subtitle: "Browse the audit log",
+        icon: "hero-clock"
+      },
+      %{
+        kind: "page",
+        id: "/snippets",
+        title: "Runbooks",
+        subtitle: "Saved commands & multi-run",
+        icon: "hero-command-line"
+      }
+    ]
+
+    items =
+      Enum.map(apps, fn app ->
+        %{kind: "app", id: app.id, title: app.name, subtitle: "Open #{app.desc}", icon: app.icon}
+      end) ++
+        Enum.map(servers, fn s ->
+          %{
+            kind: "server",
+            id: to_string(s.id),
+            title: s.name,
+            subtitle: "Open terminal on #{s.host}",
+            icon: "hero-server"
+          }
+        end) ++
+        pages ++
+        Enum.map(snippets, fn snippet ->
+          %{
+            kind: "snippet",
+            id: to_string(snippet.id),
+            title: snippet.name,
+            subtitle: "Runbook · #{snippet.category}",
+            icon: "hero-play"
+          }
+        end)
+
+    term = String.downcase(String.trim(query))
+
+    items
+    |> Enum.filter(fn item ->
+      term == "" or String.contains?(String.downcase(item.title), term) or
+        String.contains?(String.downcase(item.subtitle), term)
+    end)
+    |> Enum.take(20)
+  end
+
   defp find_window(socket, wid) do
     Enum.find(socket.assigns.windows, &(&1.id == wid))
   end
@@ -3544,6 +3672,9 @@ defmodule MarsadWeb.DesktopLive do
     <Layouts.app fluid flash={@flash}>
       <div
         id="desktop-shell"
+        phx-window-keydown="palette-open"
+        phx-key="k"
+        phx-ctrl
         data-theme={@appearance.mode}
         style={"--marsad-accent: #{@appearance.hex}; --marsad-accent-ink: #{@appearance.ink}"}
         class="marsad-desktop relative flex h-full w-full flex-col text-base-content"
@@ -3574,6 +3705,20 @@ defmodule MarsadWeb.DesktopLive do
           </span>
           <span class="hidden h-4 w-px bg-base-content/15 sm:block" aria-hidden="true" />
           <.connection_pill servers={@servers} active_server_id={@active_server_id} />
+          <div class="ml-3 hidden items-center gap-1 md:flex">
+            <.link navigate={~p"/overview"} id="nav-overview" class="btn btn-ghost btn-xs">Overview</.link>
+            <.link navigate={~p"/activity"} id="nav-activity" class="btn btn-ghost btn-xs">Activity</.link>
+            <.link navigate={~p"/snippets"} id="nav-snippets" class="btn btn-ghost btn-xs">Runbooks</.link>
+            <button
+              id="nav-palette"
+              phx-click="palette-open"
+              class="btn btn-ghost btn-xs gap-1.5"
+              title="Command palette (Ctrl+K)"
+            >
+              <.icon name="hero-magnifying-glass" class="size-3.5" />
+              <kbd class="rounded border border-base-content/20 px-1">⌘K</kbd>
+            </button>
+          </div>
           <span class="ml-auto hidden items-center gap-2 text-xs text-base-content/60 md:flex">
             <.icon name="hero-lock-closed" class="size-3.5 text-emerald-500" />
             <span class="font-mono">SSH fleet manager</span>
@@ -3865,6 +4010,61 @@ defmodule MarsadWeb.DesktopLive do
           </span>
         </div>
       </div>
+
+      <%!-- Command palette --%>
+      <%= if @palette_open do %>
+        <div
+          id="command-palette-overlay"
+          class="fixed inset-0 z-[200] flex items-start justify-center bg-black/60 px-4 pt-[12vh] backdrop-blur-sm"
+        >
+          <div class="absolute inset-0" phx-click="palette-close" aria-hidden="true"></div>
+          <div
+            id="command-palette"
+            class="relative w-full max-w-xl overflow-hidden rounded-2xl border border-base-content/15 bg-base-100 shadow-2xl"
+            phx-window-keydown="palette-close"
+            phx-key="Escape"
+          >
+            <div class="flex items-center gap-3 border-b border-base-content/10 px-4 py-3">
+              <.icon name="hero-magnifying-glass" class="size-5 shrink-0 text-base-content/40" />
+              <input
+                id="command-palette-input"
+                phx-hook="AutoFocus"
+                phx-change="palette-query"
+                phx-debounce="100"
+                name="query"
+                value={@palette_query}
+                autocomplete="off"
+                placeholder="Search apps, servers, runbooks…"
+                class="w-full bg-transparent text-sm outline-none placeholder:text-base-content/40"
+              />
+              <kbd class="rounded border border-base-content/20 px-1.5 py-0.5 text-[10px] text-base-content/50">ESC</kbd>
+            </div>
+            <div id="command-palette-results" class="max-h-[60vh] overflow-y-auto p-2">
+              <button
+                :for={item <- @palette_results}
+                id={"palette-item-#{item.kind}-#{String.replace(item.id, "/", "-")}"}
+                phx-click="palette-select"
+                phx-value-kind={item.kind}
+                phx-value-id={item.id}
+                class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-[color:var(--marsad-accent)]/10"
+              >
+                <.icon name={item.icon} class="size-4 shrink-0 text-base-content/50" />
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate text-sm font-semibold">{item.title}</span>
+                  <span class="block truncate text-xs text-base-content/50">{item.subtitle}</span>
+                </span>
+                <.icon name="hero-arrow-small-right" class="size-4 text-base-content/30" />
+              </button>
+              <div
+                :if={@palette_results == []}
+                class="px-3 py-8 text-center text-sm text-base-content/50"
+              >
+                Nothing matches “{@palette_query}”.
+              </div>
+            </div>
+          </div>
+        </div>
+      <% end %>
 
       <%!-- Toast container --%>
       <div id="toast-container" phx-update="ignore"></div>

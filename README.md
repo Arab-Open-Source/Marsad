@@ -92,6 +92,14 @@ The application is built with Phoenix LiveView and Elixir, leveraging OTP for co
 - Edit config files with save capability
 - Error log viewer (last 100 lines)
 
+### Productivity & fleet overview
+- **Fleet Overview** (`/`) is the landing page: per-server CPU/disk/RAM cards from stored metrics, online/offline status and the latest audit events
+- **Command Palette** (Ctrl+K) searches apps, servers, pages and runbooks; selecting a server opens its terminal, selecting a runbook opens it ready to run
+- **Activity Timeline** (`/activity`) is a searchable, filterable fleet-wide audit log (server, action, result)
+- **Runbooks** (`/snippets`) stores reusable commands with `{{variables}}` and runs the rendered command on one or many selected servers in parallel
+
+The classic mini-OS desktop lives at `/desktop` and is linked from the overview and the palette.
+
 ## Architecture
 
 ### Core Contexts

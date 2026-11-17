@@ -29,13 +29,14 @@ import { CodeEditor } from "./hooks/code_editor"
 import { ChartHook } from "./hooks/chart"
 import { ConnectionStatus } from "./hooks/connection_status"
 import { Toast } from "./hooks/toast"
+const AutoFocus = { mounted() { this.el.focus() } }
 import { initToastHandler } from "./toast-handler"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, XtermTerminal, CodeEditor, ChartHook, ConnectionStatus, Toast},
+  hooks: {...colocatedHooks, XtermTerminal, CodeEditor, ChartHook, ConnectionStatus, Toast, AutoFocus},
 })
 
 // Show progress bar on live navigation and form submits

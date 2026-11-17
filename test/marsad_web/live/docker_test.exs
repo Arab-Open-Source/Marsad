@@ -101,7 +101,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "start action is async with correct past tense", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [exec_reply("web\n"), exec_reply(@ps)])
@@ -114,7 +114,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "remove action flashes removed", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [exec_reply("web\n"), exec_reply("")])
@@ -125,7 +125,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "forged actions never crash", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     view |> render_click("docker-action", %{"action" => "rm", "name" => "web"})
@@ -134,7 +134,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "logs support tail, timestamps and text filter", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [exec_reply("INFO started\nERROR boom\n")])
@@ -158,7 +158,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "logs collapse and wrap toggle without refetch", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [exec_reply("line1\nline2\n")])
@@ -176,7 +176,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "stats and inspect load async", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [exec_reply("{\"Name\":\"web\",\"CPUPerc\":\"1.0%\"}\n")])
@@ -192,7 +192,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "images tab lists, removes and prunes", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [
@@ -214,7 +214,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "stacks expand and restart services", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     enqueue(stub, [
@@ -243,7 +243,7 @@ defmodule MarsadWeb.DockerTest do
   test "activity tab shows audit entries", %{conn: conn, stub: stub, server: server} do
     :ok = Services.audit(server.id, "docker_start", "web", "ok")
 
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     view |> element("#docker-tab-activity") |> render_click()
@@ -251,7 +251,7 @@ defmodule MarsadWeb.DockerTest do
   end
 
   test "filter narrows containers without SSH", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_docker(view, stub)
 
     view

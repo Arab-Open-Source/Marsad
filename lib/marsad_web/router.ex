@@ -44,7 +44,11 @@ defmodule MarsadWeb.Router do
     pipe_through [:browser, :require_admin]
 
     live_session :app, on_mount: {MarsadWeb.LiveAuth, :ensure} do
-      live "/", DesktopLive, :index
+      live "/", OverviewLive, :index
+      live "/desktop", DesktopLive, :index
+      live "/overview", OverviewLive, :index
+      live "/activity", ActivityLive, :index
+      live "/snippets", SnippetsLive, :index
     end
 
     get "/files/download", FileDownloadController, :download

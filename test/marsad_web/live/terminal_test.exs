@@ -52,7 +52,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "server window negotiates shell mode and streams raw bytes", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
 
@@ -70,7 +70,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "fullscreen escape sequences flow through (vim/nano/top)", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
     ready(view, wid)
@@ -87,7 +87,7 @@ defmodule MarsadWeb.TerminalTest do
     conn: conn,
     server: server
   } do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
 
@@ -107,7 +107,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "rapid PTY chunks are coalesced into one event", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
 
@@ -126,7 +126,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "cd and later commands stream in order", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
     ready(view, wid)
@@ -148,7 +148,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "exit ends the session; next input reopens it", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
     ready(view, wid)
@@ -167,7 +167,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "failed shell open shows an error, retry works", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
 
@@ -195,7 +195,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "resize is forwarded with real dimensions", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
     ready(view, wid, 100, 30)
@@ -214,7 +214,7 @@ defmodule MarsadWeb.TerminalTest do
     conn: conn,
     server: server
   } do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
 
@@ -235,7 +235,7 @@ defmodule MarsadWeb.TerminalTest do
   end
 
   test "toolbar clear wipes the screen", %{conn: conn, server: server} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     open_terminal(view)
     wid = "terminal-#{server.id}"
     ready(view, wid)
@@ -249,7 +249,7 @@ defmodule MarsadWeb.TerminalTest do
   test "demo mode echoes without a server", %{conn: conn} do
     for s <- Fleet.list_servers(), do: {:ok, _} = Fleet.delete_server(s)
 
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     view |> element("#icon-terminal") |> render_click()
 
     view |> render_click("terminal_ready", %{"window_id" => "terminal"})

@@ -10,18 +10,18 @@ defmodule MarsadWeb.DesktopLiveTest do
   test "redirects to login when unauthenticated" do
     # The shared setup already created the admin, so a raw conn is a guest post-setup.
     conn = Phoenix.ConnTest.build_conn()
-    assert {:error, {:redirect, %{to: "/login"}}} = live(conn, ~p"/")
+    assert {:error, {:redirect, %{to: "/login"}}} = live(conn, ~p"/desktop")
   end
 
   test "redirects to setup on fresh install" do
     # Wipe the setup-created admin to simulate first run.
     :ok = Marsad.Accounts.reset_all()
     conn = Phoenix.ConnTest.build_conn()
-    assert {:error, {:redirect, %{to: "/setup"}}} = live(conn, ~p"/")
+    assert {:error, {:redirect, %{to: "/setup"}}} = live(conn, ~p"/desktop")
   end
 
   test "desktop shell renders with app icons and taskbar", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     assert has_element?(view, "#desktop-shell")
     assert has_element?(view, "#desktop-icons")
@@ -31,7 +31,7 @@ defmodule MarsadWeb.DesktopLiveTest do
   end
 
   test "opening the terminal app spawns a tab with an xterm hook", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#cta-open-servers") |> render_click()
     assert has_element?(view, "#tab-servers")
@@ -43,7 +43,7 @@ defmodule MarsadWeb.DesktopLiveTest do
   end
 
   test "settings app switches theme and accent, persisted in DB", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#icon-settings") |> render_click()
     assert has_element?(view, "#settings-appearance")
@@ -60,7 +60,7 @@ defmodule MarsadWeb.DesktopLiveTest do
   end
 
   test "tabs switch without losing panels, and close works", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#icon-servers") |> render_click()
     view |> element("#icon-terminal") |> render_click()
@@ -94,7 +94,7 @@ defmodule MarsadWeb.DesktopLiveTest do
       })
 
     assert server.id
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#icon-files") |> render_click()
 
@@ -125,7 +125,7 @@ defmodule MarsadWeb.DesktopLiveTest do
   end
 
   test "files and monitor tabs render empty states without servers", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#icon-files") |> render_click()
     assert has_element?(view, "#files-browser")
@@ -137,7 +137,7 @@ defmodule MarsadWeb.DesktopLiveTest do
   end
 
   test "docker, systemd and nginx tabs render empty states without servers", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#icon-docker") |> render_click()
     assert has_element?(view, "#docker-panel")
@@ -153,7 +153,7 @@ defmodule MarsadWeb.DesktopLiveTest do
   end
 
   test "servers app can add a server", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/desktop")
 
     view |> element("#cta-open-servers") |> render_click()
     view |> element("#new-server") |> render_click()

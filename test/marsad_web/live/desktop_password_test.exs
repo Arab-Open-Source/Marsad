@@ -8,7 +8,7 @@ defmodule MarsadWeb.DesktopPasswordTest do
   end
 
   test "change-password rejects mismatch", %{conn: conn} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     view |> element("#icon-settings") |> render_click()
 
     view
@@ -20,7 +20,7 @@ defmodule MarsadWeb.DesktopPasswordTest do
   end
 
   test "change-password accepts valid password and signs in with it", %{conn: conn} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     view |> element("#icon-settings") |> render_click()
 
     admin_username =
@@ -35,7 +35,7 @@ defmodule MarsadWeb.DesktopPasswordTest do
   end
 
   test "change-password rejects short password", %{conn: conn} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     view |> element("#icon-settings") |> render_click()
 
     view
@@ -46,7 +46,7 @@ defmodule MarsadWeb.DesktopPasswordTest do
   end
 
   test "reset-auth deletes admin and navigates to setup", %{conn: conn} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     view |> element("#icon-settings") |> render_click()
 
     assert Marsad.Accounts.admin_exists?()
@@ -56,7 +56,7 @@ defmodule MarsadWeb.DesktopPasswordTest do
   end
 
   test "settings shows current admin and logout link", %{conn: conn} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
     assert has_element?(view, "#topbar-logout")
     view |> element("#icon-settings") |> render_click()
     assert has_element?(view, "#logout-link")

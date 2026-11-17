@@ -99,7 +99,7 @@ defmodule MarsadWeb.NginxCertsTest do
   defp pad(n), do: String.pad_leading(to_string(n), 2, "0")
 
   test "check button loads the certificate table", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
 
     # nginx open: status is 2 execs (is-active + nginx -t), then files list.
     enqueue(stub, [
@@ -125,7 +125,7 @@ defmodule MarsadWeb.NginxCertsTest do
   end
 
   test "error log collapses and closes", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
 
     enqueue(stub, [
       exec_reply("active\n"),
@@ -148,7 +148,7 @@ defmodule MarsadWeb.NginxCertsTest do
   end
 
   test "renew button opens a live modal ending in success", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
 
     enqueue(stub, [
       exec_reply("active\n"),
@@ -191,7 +191,7 @@ defmodule MarsadWeb.NginxCertsTest do
   end
 
   test "critical certs raise a summary pill", %{conn: conn, stub: stub} do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/desktop")
 
     enqueue(stub, [
       exec_reply("active\n"),
