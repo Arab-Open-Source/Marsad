@@ -1,11 +1,18 @@
 # syntax=docker/dockerfile:1
 
+FROM node:20-bookworm-slim AS nodejs
+
 ###############################################################################
 # Build stage — compiles the Elixir release and the digested static assets.
 ###############################################################################
 FROM elixir:1.17-otp-27 AS builder
 
 WORKDIR /app
+
+COPY --from=nodejs /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodejs /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates git curl \
@@ -25,6 +32,8 @@ COPY config ./config
 COPY assets ./assets
 COPY lib ./lib
 COPY priv ./priv
+
+RUN npm ci --prefix assets
 
 RUN mix assets.setup \
     && mix assets.deploy \

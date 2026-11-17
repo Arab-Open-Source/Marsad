@@ -24,6 +24,10 @@ Write-Host "==> Fetching dependencies"
 mix deps.get
 if ($LASTEXITCODE -ne 0) { throw "mix deps.get failed" }
 
+Write-Host "==> Installing npm packages"
+npm ci --prefix assets
+if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+
 Write-Host "==> Installing asset tooling"
 mix assets.setup
 if ($LASTEXITCODE -ne 0) { throw "mix assets.setup failed" }

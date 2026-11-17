@@ -25,6 +25,9 @@ export MARSAD_VAULT_KEY="${MARSAD_VAULT_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODl
 echo "==> Fetching dependencies"
 mix deps.get
 
+echo "==> Installing npm packages"
+npm ci --prefix assets
+
 echo "==> Installing asset tooling"
 mix assets.setup
 
