@@ -83,6 +83,48 @@ defmodule MarsadWeb.TerminalTest do
     assert data =~ "\e[?1049h"
   end
 
+  test "malformed PTY bytes never reach push_event as invalid UTF-8", %{
+    conn: conn,
+    server: server
+  } do
+    {:ok, view, _} = live(conn, ~p"/")
+    open_terminal(view)
+    wid = "terminal-#{server.id}"
+
+    ready(view, wid)
+    assert_push_event(view, "terminal_mode", %{mode: "shell"}, 1000)
+    drain_connecting(view)
+
+    live_pid = view.pid
+    FakeShellTransport.enqueue(<<0xFF, 0xFE, "root@host:~$ ">>)
+    view |> render_click("terminal_input", %{"data" => "cat bin\r", "window_id" => wid})
+
+    assert_push_event(view, "terminal_output", %{data: data}, 2000)
+    assert String.valid?(data)
+    assert Jason.encode!(%{data: data})
+    assert data =~ "root@host:~$ "
+    assert Process.alive?(live_pid)
+  end
+
+  test "rapid PTY chunks are coalesced into one event", %{conn: conn, server: server} do
+    {:ok, view, _} = live(conn, ~p"/")
+    open_terminal(view)
+    wid = "terminal-#{server.id}"
+
+    ready(view, wid)
+    assert_push_event(view, "terminal_mode", %{mode: "shell"}, 1000)
+    assert_push_event(view, "terminal_output", %{data: _connecting}, 2000)
+
+    FakeShellTransport.enqueue("part1")
+    view |> render_click("terminal_input", %{"data" => "cmd1\r", "window_id" => wid})
+    FakeShellTransport.enqueue("part2")
+    view |> render_click("terminal_input", %{"data" => "cmd2\r", "window_id" => wid})
+
+    assert_push_event(view, "terminal_output", %{data: data}, 2000)
+    assert data =~ "part1"
+    assert data =~ "part2"
+  end
+
   test "cd and later commands stream in order", %{conn: conn, server: server} do
     {:ok, view, _} = live(conn, ~p"/")
     open_terminal(view)
@@ -132,9 +174,18 @@ defmodule MarsadWeb.TerminalTest do
     FakeShellTransport.fail_open_once(:econnrefused)
     ready(view, wid)
     assert_push_event(view, "terminal_mode", %{mode: "shell"}, 1000)
-    drain_connecting(view)
-    # The failed open itself reports an error; drain it before retrying.
-    assert_push_event(view, "terminal_output", %{data: failed}, 2000)
+    # The connecting line and the open error can be coalesced into one event.
+    assert_push_event(view, "terminal_output", %{data: first}, 2000)
+    assert first =~ "connecting to"
+
+    failed =
+      if first =~ "cannot open shell" do
+        first
+      else
+        assert_push_event(view, "terminal_output", %{data: more}, 2000)
+        more
+      end
+
     assert failed =~ "cannot open shell"
 
     FakeShellTransport.enqueue("ok$ ")

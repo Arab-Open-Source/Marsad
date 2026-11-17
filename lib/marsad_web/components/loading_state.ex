@@ -10,17 +10,19 @@ defmodule MarsadWeb.Components.LoadingState do
     ~H"""
     <div class={["flex items-center justify-center gap-3", @class]}>
       <.icon name="hero-arrow-path" class={["animate-spin", spinner_size(@size)]} />
-      <span :if={@text} class={text_size(@size)}><%= @text %></span>
+      <span :if={@text} class={text_size(@size)}>{@text}</span>
     </div>
     """
   end
 
   attr :rows, :integer, default: 5
   attr :class, :string, default: ""
+  attr :text, :string, default: nil
 
   def skeleton_loader(assigns) do
     ~H"""
     <div class={["animate-pulse space-y-3", @class]}>
+      <span :if={@text} class="sr-only">{@text}</span>
       <div :for={_ <- 1..@rows} class="flex items-center gap-3">
         <div class="w-10 h-10 bg-gray-700 rounded"></div>
         <div class="flex-1 space-y-2">

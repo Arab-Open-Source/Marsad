@@ -26,7 +26,8 @@ defmodule Marsad.SSH.FakeShellTransport do
           sessions: %{},
           fail_open: nil,
           open_gate: false,
-          open_waiters: []
+          open_waiters: [],
+          adjusts: []
         }
       end,
       name: __MODULE__
@@ -41,7 +42,8 @@ defmodule Marsad.SSH.FakeShellTransport do
         sessions: %{},
         fail_open: nil,
         open_gate: false,
-        open_waiters: []
+        open_waiters: [],
+        adjusts: []
       }
     end)
   end
@@ -87,6 +89,14 @@ defmodule Marsad.SSH.FakeShellTransport do
 
   @impl true
   def close(_conn), do: :ok
+
+  @impl true
+  def adjust_window(_conn, channel, bytes) do
+    Agent.update(__MODULE__, fn s -> %{s | adjusts: [{channel, bytes} | s.adjusts]} end)
+    :ok
+  end
+
+  def adjusts, do: Agent.get(__MODULE__, &Enum.reverse(&1.adjusts))
 
   @impl true
   def open_shell(conn, cols, rows) do

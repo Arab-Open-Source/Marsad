@@ -34,7 +34,10 @@ defmodule Marsad.Fleet.ServerShell do
 
   def child_spec(args) do
     %{
-      id: {__MODULE__, args.server_id, args.window_id},
+      # The Registry key includes lv_pid, so the supervisor id must too.
+      # Otherwise a LiveView reconnect can't start a fresh shell: the supervisor
+      # reports the old shell (bound to the dead LiveView) as already started.
+      id: {__MODULE__, args.server_id, args.window_id, args.lv_pid},
       start: {__MODULE__, :start_link, [args]},
       restart: :temporary
     }
@@ -58,7 +61,10 @@ defmodule Marsad.Fleet.ServerShell do
   @doc "Streams raw keystrokes to the shell (buffered while connecting)."
   def input(server_id, window_id, lv_pid, data) do
     with {:ok, pid} <- alive_shell(server_id, window_id, lv_pid) do
-      GenServer.call(pid, {:input, IO.iodata_to_binary(data)})
+      # Fire-and-forget: the client needs no reply. A synchronous call per
+      # keystroke (or SGR mouse report) stalls the LiveView on every round-trip.
+      GenServer.cast(pid, {:input, IO.iodata_to_binary(data)})
+      :ok
     end
   rescue
     _ -> {:error, :gone}
@@ -184,18 +190,19 @@ defmodule Marsad.Fleet.ServerShell do
   end
 
   @impl true
-  def handle_call({:input, data}, _from, %{phase: :open} = state) do
+  def handle_cast({:input, data}, %{phase: :open} = state) do
     case transport().shell_send(state.conn, state.channel, data) do
-      :ok -> {:reply, :ok, state}
-      {:error, reason} -> {:reply, {:error, reason}, close_down(state, reason)}
+      :ok -> {:noreply, state}
+      {:error, reason} -> {:noreply, close_down(state, reason)}
     end
   end
 
-  def handle_call({:input, data}, _from, %{phase: :connecting} = state) do
+  def handle_cast({:input, data}, %{phase: :connecting} = state) do
     pending = String.slice(state.pending <> data, -@max_pending..-1//1)
-    {:reply, :ok, %{state | pending: pending}}
+    {:noreply, %{state | pending: pending}}
   end
 
+  @impl true
   def handle_call({:resize, cols, rows}, _from, state) do
     state = %{state | cols: max(cols, 1), rows: max(rows, 1)}
 
@@ -211,10 +218,17 @@ defmodule Marsad.Fleet.ServerShell do
         {:ssh_cm, conn, {:data, channel, _type, data}},
         %{conn: conn, channel: channel} = state
       ) do
+    payload = IO.iodata_to_binary(data)
+
+    # This is a plain GenServer channel, not an `ssh_client_channel` behaviour,
+    # so OTP will NOT replenish the receive window for us. Without this the
+    # remote blocks after ~2MB of output — a full-screen TUI freezes and only
+    # recovers when the shell/connection is reopened.
+    transport().adjust_window(conn, channel, byte_size(payload))
+
     notify(
       state,
-      {:shell_output, key(state.server.id, state.window_id, state.lv_pid),
-       IO.iodata_to_binary(data)}
+      {:shell_output, key(state.server.id, state.window_id, state.lv_pid), payload}
     )
 
     {:noreply, state}

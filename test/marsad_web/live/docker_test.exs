@@ -107,7 +107,8 @@ defmodule MarsadWeb.DockerTest do
     enqueue(stub, [exec_reply("web\n"), exec_reply(@ps)])
     view |> element("#container-web button[phx-value-action=start]") |> render_click()
 
-    wait_until(fn -> render(view) =~ "Container started." end)
+    assert_push_event(view, "show-toast", %{type: "success", message: message}, 2000)
+    assert message =~ "started successfully"
     # List reload preserved the row.
     assert has_element?(view, "#container-web")
   end
@@ -119,7 +120,8 @@ defmodule MarsadWeb.DockerTest do
     enqueue(stub, [exec_reply("web\n"), exec_reply("")])
     view |> element("#container-web button[phx-value-action=remove]") |> render_click()
 
-    wait_until(fn -> render(view) =~ "Container removed." end)
+    assert_push_event(view, "show-toast", %{type: "success", message: message}, 2000)
+    assert message =~ "removed successfully"
   end
 
   test "forged actions never crash", %{conn: conn, stub: stub} do

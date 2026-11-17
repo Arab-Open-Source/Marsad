@@ -17,6 +17,15 @@ defmodule Marsad.SSH do
   @callback close(connection()) :: :ok
 
   @doc """
+  Replenishes the SSH flow-control window after consuming channel data.
+
+  Plain GenServer channels (not `ssh_client_channel` behaviours) MUST call
+  this; otherwise the remote blocks once the receive window fills — a
+  full-screen TUI then freezes until the channel is reopened.
+  """
+  @callback adjust_window(connection(), term(), non_neg_integer()) :: :ok
+
+  @doc """
   Opens an interactive shell channel with a PTY (for terminals: vim, top…).
   Returns `{:ok, channel}` where channel is an `:ssh_connection` channel id.
   `cols`/`rows` size the remote PTY.

@@ -14,7 +14,7 @@ defmodule MarsadWeb.Components.StatusBadge do
       @class
     ]}>
       <span class="w-1.5 h-1.5 rounded-full bg-current"></span>
-      <%= format_status(@status) %>
+      {format_status(@status)}
     </span>
     """
   end

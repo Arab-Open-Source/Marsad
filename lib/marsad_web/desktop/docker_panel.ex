@@ -1,7 +1,6 @@
 defmodule MarsadWeb.Desktop.DockerPanel do
   @moduledoc "Docker containers panel (function component; events live in DesktopLive)."
   use MarsadWeb, :html
-  import MarsadWeb.Components.StatusBadge
   import MarsadWeb.Components.EmptyState
   import MarsadWeb.Components.LoadingState
 
@@ -78,6 +77,7 @@ defmodule MarsadWeb.Desktop.DockerPanel do
 
       <.empty_state
         :if={!@state.server_id}
+        id="docker-empty"
         icon="hero-cube"
         title="No server selected"
         description="Pick a server above to manage Docker containers."
@@ -205,7 +205,7 @@ defmodule MarsadWeb.Desktop.DockerPanel do
 
       <%= case @state.data do %>
         <% nil -> %>
-          <.skeleton_loader rows={5} class="p-2" />
+          <.skeleton_loader rows={5} text="Loading containers" class="p-2" />
         <% {:error, :docker_unavailable} -> %>
           <div
             role="alert"

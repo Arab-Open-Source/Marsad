@@ -3,6 +3,28 @@ defmodule Marsad.Helpers.TextTest do
 
   alias Marsad.Helpers.Text
 
+  test "utf8_safe keeps valid text and escape sequences byte-for-byte" do
+    clean = "root@host:~$ \e[32m✓\e[0m\r\n"
+    assert Text.utf8_safe(clean) == clean
+    assert Text.utf8_safe(<<"caf", 0xE2, 0x9C, 0x93>>) == "caf✓"
+    assert Text.utf8_safe("") == ""
+  end
+
+  test "utf8_safe replaces malformed PTY bytes and is always JSON-safe" do
+    bad = <<0xFF, 0xFE, 0x80, "abc">>
+    out = Text.utf8_safe(bad)
+
+    assert String.valid?(out)
+    assert out == <<0xEF, 0xBF, 0xBD>> <> <<0xEF, 0xBF, 0xBD>> <> <<0xEF, 0xBF, 0xBD>> <> "abc"
+    assert Jason.encode!(%{data: out})
+
+    # Truncated multibyte sequence at the end of a chunk: each leftover byte
+    # is malformed on its own and becomes one replacement character.
+    truncated = Text.utf8_safe(<<0xE2, 0x9C>>)
+    assert String.valid?(truncated)
+    assert truncated == <<0xEF, 0xBF, 0xBD>> <> <<0xEF, 0xBF, 0xBD>>
+  end
+
   test "shell_quote wraps and escapes" do
     assert Text.shell_quote("hello") == "'hello'"
     assert Text.shell_quote("a'b") == "'a'\\''b'"

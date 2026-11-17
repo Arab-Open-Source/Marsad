@@ -54,6 +54,41 @@ defmodule Marsad.Fleet.ServerShellTest do
     refute Process.alive?(pid)
   end
 
+  test "a reconnected LiveView gets a fresh shell, not the old one", %{server: server} do
+    wid = "w-reconnect"
+    test = self()
+    owner1 = spawn(fn -> forward_loop(test) end)
+    owner2 = spawn(fn -> forward_loop(test) end)
+
+    assert {:ok, p1} = ServerShell.ensure(server.id, wid, owner1, 80, 24)
+    assert_receive {:shell_opened, {_, _, ^wid, ^owner1}}, 2000
+
+    # Same server + window, new LiveView pid: the supervisor id must differ.
+    assert {:ok, p2} = ServerShell.ensure(server.id, wid, owner2, 80, 24)
+    assert_receive {:shell_opened, {_, _, ^wid, ^owner2}}, 2000
+
+    refute p1 == p2
+    assert Process.alive?(p1)
+    assert Process.alive?(p2)
+
+    send(owner1, :stop)
+    send(owner2, :stop)
+  end
+
+  test "shell replenishes the SSH flow-control window on output", %{server: server} do
+    wid = "w-window"
+    assert {:ok, _pid} = ServerShell.ensure(server.id, wid, self(), 80, 24)
+    assert_receive {:shell_opened, _}, 2000
+
+    payload = "a-bunch-of-remote-output"
+    FakeShellTransport.enqueue(payload)
+    assert :ok = ServerShell.input(server.id, wid, self(), "go\r")
+    assert_receive {:shell_output, _, ^payload}, 2000
+
+    assert {_channel, bytes} = hd(FakeShellTransport.adjusts())
+    assert bytes == byte_size(payload)
+  end
+
   test "input typed while connecting is buffered and flushed", %{server: server} do
     wid = "w2"
     # Block the open: enqueue nothing yet; open_shell itself succeeds
@@ -62,9 +97,12 @@ defmodule Marsad.Fleet.ServerShellTest do
     # while connecting (transport is instant, so force via direct call order
     # is racy). Deterministic approach: stop the shell mid-connect is hard;
     # instead assert input-before-open still delivers once open.
-    assert {:ok, _} = ServerShell.ensure(server.id, wid, self(), 80, 24)
+    assert {:ok, pid} = ServerShell.ensure(server.id, wid, self(), 80, 24)
     assert :ok = ServerShell.input(server.id, wid, self(), "early\r")
     assert_receive {:shell_opened, _}, 2000
+
+    # Input is a cast: sync with the shell before inspecting the transport.
+    _ = :sys.get_state(pid)
 
     # Either it was buffered+flushed (one send) or sent directly — both fine.
     sends = for {:send, bin} <- FakeShellTransport.sent(), do: bin

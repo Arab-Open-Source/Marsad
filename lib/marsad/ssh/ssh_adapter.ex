@@ -70,6 +70,15 @@ defmodule Marsad.SSH.SshAdapter do
     _ -> :ok
   end
 
+  @impl true
+  def adjust_window(conn, channel, bytes) do
+    :ssh_connection.adjust_window(conn, channel, bytes)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   @shell_timeout 10_000
 
   @impl true
@@ -463,20 +472,14 @@ defmodule Marsad.SSH.SshAdapter do
   defp collect(channel, conn, timeout, acc) do
     receive do
       {:ssh_cm, ^conn, {:data, ^channel, 0, data}} ->
-        collect(
-          channel,
-          conn,
-          timeout,
-          Map.update!(acc, :stdout, &(&1 <> IO.iodata_to_binary(data)))
-        )
+        payload = IO.iodata_to_binary(data)
+        adjust_window(conn, channel, byte_size(payload))
+        collect(channel, conn, timeout, Map.update!(acc, :stdout, &(&1 <> payload)))
 
       {:ssh_cm, ^conn, {:data, ^channel, 1, data}} ->
-        collect(
-          channel,
-          conn,
-          timeout,
-          Map.update!(acc, :stderr, &(&1 <> IO.iodata_to_binary(data)))
-        )
+        payload = IO.iodata_to_binary(data)
+        adjust_window(conn, channel, byte_size(payload))
+        collect(channel, conn, timeout, Map.update!(acc, :stderr, &(&1 <> payload)))
 
       {:ssh_cm, ^conn, {:eof, ^channel}} ->
         collect(channel, conn, timeout, acc)

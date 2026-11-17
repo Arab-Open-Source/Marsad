@@ -150,10 +150,47 @@ export const XtermTerminal = {
       }
     });
 
+    // Batched raw input: one WebSocket round-trip per ~16ms instead of one
+    // per keystroke/mouse-report. Mouse-driven TUIs (vim/htop) emit hundreds
+    // of SGR reports per drag; sending them individually floods the channel
+    // and makes the terminal feel laggy. Reassembly order is preserved.
+    this._inputQueue = "";
+    this._inputTimer = null;
+    this._flushInput = () => {
+      this._inputTimer = null;
+      const data = this._inputQueue;
+      this._inputQueue = "";
+      if (data) this.pushEvent("terminal_input", { data, window_id: this.windowId });
+    };
+    this._queueInput = (data) => {
+      if (data === "\r" || data === "\n" || data === "\u0003" || data === "\u0004") {
+        // Enter / SIGINT / EOF: append then flush immediately so command
+        // submission and cancellation never wait for the batching window.
+        this._inputQueue += data;
+        this._flushInput();
+        return;
+      }
+      // Mouse *motion* reports (button 32-63) flood during a drag; only the
+      // latest position matters. Presses and wheel events (0-31, 64+) are kept.
+      const motion = /^\x1b\[<(3[2-9]|[4-5]\d|6[0-3]);\d+;\d+M$/;
+      if (motion.test(data)) {
+        const trailing = this._inputQueue.match(/(\x1b\[<(\d+);\d+;\d+M)$/);
+        if (trailing && motion.test(trailing[1])) {
+          this._inputQueue = this._inputQueue.slice(0, -trailing[1].length) + data;
+        } else {
+          this._inputQueue += data;
+        }
+      } else {
+        this._inputQueue += data;
+      }
+
+      if (!this._inputTimer) this._inputTimer = window.setTimeout(this._flushInput, 16);
+    };
+
     this.term.onData((data) => {
       if (this.shellMode) {
         // Raw passthrough: the remote PTY owns echo, line editing, history.
-        this.pushEvent("terminal_input", { data, window_id: this.windowId });
+        this._queueInput(data);
       } else {
         this.handleInput(data);
       }
@@ -316,6 +353,9 @@ export const XtermTerminal = {
   },
 
   destroyed() {
+    if (this._flushInput) {
+      try { this._flushInput(); } catch (_e) { /* view already gone */ }
+    }
     if (this._fitTimer) window.clearTimeout(this._fitTimer);
     if (this._resizeObserver) this._resizeObserver.disconnect();
     if (this._panelObserver) this._panelObserver.disconnect();
@@ -446,10 +486,8 @@ export const XtermTerminal = {
         .then((t) => {
           if (this.shellMode) {
             // Raw paste: newlines become carriage returns for the remote.
-            this.pushEvent("terminal_input", {
-              data: String(t || "").replace(/\r\n?/g, "\r"),
-              window_id: this.windowId,
-            });
+            this._queueInput(String(t || "").replace(/\r\n?/g, "\r"));
+            this._flushInput();
           } else {
             this.injectPaste(t || "");
           }

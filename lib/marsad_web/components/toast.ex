@@ -25,8 +25,8 @@ defmodule MarsadWeb.Components.Toast do
       ]}>
         <.icon name={toast_icon(@type)} class="w-5 h-5 flex-shrink-0 mt-0.5" />
         <div class="flex-1 min-w-0">
-          <p :if={@title} class="text-sm font-semibold mb-1"><%= @title %></p>
-          <p class="text-sm"><%= @message %></p>
+          <p :if={@title} class="text-sm font-semibold mb-1">{@title}</p>
+          <p class="text-sm">{@message}</p>
         </div>
         <button
           :if={@closable}

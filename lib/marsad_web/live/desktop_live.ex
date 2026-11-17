@@ -19,6 +19,7 @@ defmodule MarsadWeb.DesktopLive do
   alias Marsad.Fleet.Server
   alias Marsad.Fleet.ServerShell
   alias Marsad.Fleet.Services
+  alias Marsad.Helpers.Text
   alias Marsad.Repo.Retry
   alias Marsad.Settings
   alias Marsad.Terminal
@@ -64,7 +65,6 @@ defmodule MarsadWeb.DesktopLive do
      |> assign(:windows, [])
      |> assign(:focused_id, nil)
      |> assign(:active_server_id, active_default(servers))
-     |> assign(:transcripts, %{})
      |> assign(:appearance, Settings.appearance())
      |> assign(:server_form, to_form(Fleet.change_server(%Server{})))
      |> assign(:show_server_form, false)
@@ -160,7 +160,6 @@ defmodule MarsadWeb.DesktopLive do
      socket
      |> close_term_shell(id)
      |> assign(:windows, windows)
-     |> assign(:transcripts, Map.delete(socket.assigns.transcripts, id))
      |> assign(:focused_id, focused_fallback(windows, socket.assigns.focused_id, id))}
   end
 
@@ -1712,17 +1711,16 @@ defmodule MarsadWeb.DesktopLive do
           socket
           |> push_event("terminal_mode", %{mode: "demo", window_id: wid})
           |> then(fn s ->
-            if Map.get(s.assigns.transcripts, wid, []) == [] do
+            if term_buffer(wid) == [] do
               push_output(
                 s,
                 wid,
                 Terminal.welcome_banner(nil) <> Terminal.demo_prompt()
               )
             else
-              push_event(s, "terminal_output", %{
-                data: Enum.join(Map.get(s.assigns.transcripts, wid, [])),
-                window_id: wid
-              })
+              data = Enum.join(term_buffer(wid))
+              clear_term_buffer(wid)
+              push_terminal_output(s, wid, data)
             end
           end)
 
@@ -1740,17 +1738,16 @@ defmodule MarsadWeb.DesktopLive do
                 Map.put(socket.assigns.term_shells, wid, %{pid: pid, open: false})
               )
               |> then(fn s ->
-                if Map.get(s.assigns.transcripts, wid, []) == [] do
+                if term_buffer(wid) == [] do
                   push_output(
                     s,
                     wid,
                     "\e[2mconnecting to #{server.username}@#{server.host}…\e[0m\r\n"
                   )
                 else
-                  push_event(s, "terminal_output", %{
-                    data: Enum.join(Map.get(s.assigns.transcripts, wid, [])),
-                    window_id: wid
-                  })
+                  data = Enum.join(term_buffer(wid))
+                  clear_term_buffer(wid)
+                  push_terminal_output(s, wid, data)
                 end
               end)
 
@@ -2177,6 +2174,25 @@ defmodule MarsadWeb.DesktopLive do
     else
       {:noreply, socket}
     end
+  end
+
+  def handle_info({:flush_terminal, wid}, socket) do
+    socket =
+      if Process.get(flush_key(wid)) do
+        Process.delete(flush_key(wid))
+        chunks = term_buffer(wid)
+        Process.delete(buffer_key(wid))
+
+        if chunks == [] do
+          socket
+        else
+          push_terminal_output(socket, wid, IO.iodata_to_binary(chunks))
+        end
+      else
+        socket
+      end
+
+    {:noreply, socket}
   end
 
   def handle_info({:shell_failed, {:shell, _sid, wid, _lv}, reason}, socket) do
@@ -3353,7 +3369,7 @@ defmodule MarsadWeb.DesktopLive do
   # Toolbar Clear: wipes the local screen. Server windows get no synthetic
   # prompt — the remote shell owns its prompt; demo windows do.
   defp clear_terminal(socket, window, wid) do
-    socket = assign(socket, :transcripts, Map.put(socket.assigns.transcripts, wid, []))
+    clear_term_buffer(wid)
     socket = push_event(socket, "terminal_clear", %{window_id: wid})
 
     if server_for(window, socket.assigns) do
@@ -3364,6 +3380,8 @@ defmodule MarsadWeb.DesktopLive do
   end
 
   defp close_term_shell(socket, wid) do
+    clear_term_buffer(wid)
+
     case Enum.find(socket.assigns.windows, &(&1.id == wid)) do
       %{server_id: sid} when not is_nil(sid) ->
         ServerShell.close(sid, wid, self())
@@ -3376,19 +3394,23 @@ defmodule MarsadWeb.DesktopLive do
 
   # Local demo line discipline (no server attached).
   defp demo_input(socket, wid, "\u0003") do
-    append_transcript(socket, wid, "^C\r\n")
+    # The hook already echoed ^C locally; only keep it for replay.
+    buffer_output(wid, "^C\r\n")
+    socket
   end
 
   defp demo_input(socket, wid, line) do
-    socket = append_transcript(socket, wid, "$ #{line}\r\n")
+    # The hook already echoed the typed line locally; only keep it for replay.
+    buffer_output(wid, "$ #{line}\r\n")
 
     case String.trim(line) do
       "" ->
         push_output(socket, wid, Terminal.demo_prompt())
 
       "clear" ->
+        clear_term_buffer(wid)
+
         socket
-        |> assign(:transcripts, Map.put(socket.assigns.transcripts, wid, []))
         |> push_event("terminal_clear", %{window_id: wid})
         |> push_output(wid, Terminal.demo_prompt())
 
@@ -3457,18 +3479,32 @@ defmodule MarsadWeb.DesktopLive do
     end
   end
 
-  # Streaming transcripts are capped by bytes (a vim session scrolls fast).
+  # PTY output must never touch socket assigns: any changed assign makes
+  # LiveView re-render the entire desktop (channel.ex render_diff). The replay
+  # transcript lives in the LiveView process dictionary instead, and output is
+  # coalesced into ~20ms batches so 1MB of `top`/`cat` output doesn't produce
+  # thousands of events and renders.
+  @term_flush_ms 20
   @transcript_byte_cap 100_000
   @transcript_chunk_cap 1000
 
-  defp append_transcript(socket, wid, chunk) do
-    chunks = Map.get(socket.assigns.transcripts, wid, []) ++ [chunk]
+  defp buffer_key(wid), do: {:marsad_term_buffer, wid}
+  defp flush_key(wid), do: {:marsad_term_flush, wid}
 
-    assign(
-      socket,
-      :transcripts,
-      Map.put(socket.assigns.transcripts, wid, trim_transcript(chunks))
-    )
+  defp term_buffer(wid), do: Process.get(buffer_key(wid), [])
+
+  defp buffer_output(wid, chunk) do
+    Process.put(buffer_key(wid), trim_transcript(term_buffer(wid) ++ [chunk]))
+
+    unless Process.get(flush_key(wid)) do
+      Process.put(flush_key(wid), true)
+      Process.send_after(self(), {:flush_terminal, wid}, @term_flush_ms)
+    end
+  end
+
+  defp clear_term_buffer(wid) do
+    Process.delete(buffer_key(wid))
+    Process.delete(flush_key(wid))
   end
 
   defp trim_transcript(chunks) do
@@ -3488,10 +3524,18 @@ defmodule MarsadWeb.DesktopLive do
     kept
   end
 
+  # Returns the socket unchanged on purpose: buffering output must not dirty
+  # the socket, otherwise every PTY chunk triggers a full desktop re-render.
   defp push_output(socket, wid, chunk) do
+    buffer_output(wid, chunk)
     socket
-    |> append_transcript(wid, chunk)
-    |> push_event("terminal_output", %{data: chunk, window_id: wid})
+  end
+
+  # All terminal_output pushes go through here: the channel serializes event
+  # payloads with encode!/1, so one invalid byte from the PTY would crash the
+  # LiveView and make the browser reconnect/remount (a visible "reload").
+  defp push_terminal_output(socket, wid, chunk) do
+    push_event(socket, "terminal_output", %{data: Text.utf8_safe(chunk), window_id: wid})
   end
 
   @impl true

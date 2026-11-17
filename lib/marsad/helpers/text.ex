@@ -1,6 +1,55 @@
 defmodule Marsad.Helpers.Text do
   @moduledoc false
 
+  @utf8_replacement <<0xEF, 0xBF, 0xBD>>
+
+  defguardp cont?(byte) when byte >= 0x80 and byte <= 0xBF
+
+  @doc """
+  Returns a valid UTF-8 version of `bin`, replacing malformed bytes with U+FFFD.
+
+  PTY output is raw bytes: binary files, legacy locales or a truncated
+  multibyte sequence can all produce invalid UTF-8. LiveView event payloads
+  are encoded with `encode!/1` by the channel serializer (Jason in prod),
+  which raises on such strings and crashes the whole LiveView — the browser
+  then reconnects/remounts, which looks like a page reload. Control/escape
+  sequences and all valid text pass through untouched.
+
+  Runs in a single linear pass: a recursive `:unicode.characters_to_binary`
+  fallback copies the remaining binary on every bad byte (seconds for a
+  binary file dumped into the terminal).
+  """
+  def utf8_safe(bin) when is_binary(bin) do
+    case :unicode.characters_to_binary(bin, :utf8, :utf8) do
+      result when is_binary(result) -> result
+      _ -> sanitize_utf8(bin, []) |> Enum.reverse() |> IO.iodata_to_binary()
+    end
+  end
+
+  # Fast path above handles all-valid input without allocating a list.
+  # Here we keep an iolist (reversed) so malformed bytes cost O(1) each.
+  defp sanitize_utf8(<<>>, acc), do: acc
+
+  defp sanitize_utf8(<<byte, rest::binary>>, acc) when byte < 0x80,
+    do: sanitize_utf8(rest, [byte | acc])
+
+  defp sanitize_utf8(<<b1, b2, rest::binary>>, acc)
+       when b1 in 0xC2..0xDF and cont?(b2),
+       do: sanitize_utf8(rest, [<<b1, b2>> | acc])
+
+  defp sanitize_utf8(<<b1, b2, b3, rest::binary>>, acc)
+       when b1 in 0xE0..0xEF and cont?(b2) and cont?(b3) and
+              (b1 != 0xE0 or b2 >= 0xA0) and (b1 != 0xED or b2 <= 0x9F),
+       do: sanitize_utf8(rest, [<<b1, b2, b3>> | acc])
+
+  defp sanitize_utf8(<<b1, b2, b3, b4, rest::binary>>, acc)
+       when b1 in 0xF0..0xF4 and cont?(b2) and cont?(b3) and cont?(b4) and
+              (b1 != 0xF0 or b2 >= 0x90) and (b1 != 0xF4 or b2 <= 0x8F),
+       do: sanitize_utf8(rest, [<<b1, b2, b3, b4>> | acc])
+
+  defp sanitize_utf8(<<_bad, rest::binary>>, acc),
+    do: sanitize_utf8(rest, [@utf8_replacement | acc])
+
   @doc "Shell-quotes a value with single quotes, escaping embedded `'`."
 
   def shell_quote(value) when is_binary(value) do
