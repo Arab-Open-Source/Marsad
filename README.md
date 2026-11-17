@@ -16,6 +16,7 @@ A Phoenix LiveView server fleet management dashboard with a mini-OS desktop inte
 - [Development](#development)
 - [Production Deployment](#production-deployment)
 - [Release 0.10.0](RELEASE.md)
+- [Requested Features / Roadmap](ROADMAP.md)
 - [Security Notes](#security-notes)
 - [License](#license)
 
