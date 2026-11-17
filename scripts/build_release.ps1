@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Join-Path $PSScriptRoot "..")
 
-$version = (& mix run -e 'IO.puts(Mix.Project.config()[:version])' --no-start).Trim()
+$version = (Select-String -Path mix.exs -Pattern 'version:\s+"([^"]+)"').Matches[0].Groups[1].Value
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   "AMD64" { "x86_64" }
   "ARM64" { "arm64" }

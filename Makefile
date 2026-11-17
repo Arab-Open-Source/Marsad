@@ -1,6 +1,6 @@
 .PHONY: help setup dev test check build release docker-build docker-up clean
 
-VERSION := $(shell mix run -e 'IO.puts(Mix.Project.config()[:version])' --no-start)
+VERSION := $(shell sed -n 's/.*version: "\([^"]*\)".*/\1/p' mix.exs | head -1)
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'

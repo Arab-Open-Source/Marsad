@@ -17,14 +17,10 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          elixir-version: "1.17"
-          otp-version: "27"
       - name: Read version from mix.exs
         id: version
         run: |
-          VERSION=$(mix run -e 'IO.puts(Mix.Project.config()[:version])' --no-start)
+          VERSION=$(sed -n 's/.*version: "\([^"]*\)".*/\1/p' mix.exs | head -1)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"

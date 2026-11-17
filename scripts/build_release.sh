@@ -5,7 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="$(mix run -e 'IO.puts(Mix.Project.config()[:version])' --no-start)"
+VERSION="$(sed -n 's/.*version: "\([^"]*\)".*/\1/p' mix.exs | head -1)"
 OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"          # linux / darwin
 ARCH="$(uname -m)"                                          # x86_64 / arm64
 case "$ARCH" in
