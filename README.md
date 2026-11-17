@@ -2,6 +2,8 @@
 
 ![Marsad Logo](priv/static/images/logo.png)
 
+[![CI](https://github.com/Arab-Open-Source/Marsad/actions/workflows/ci.yml/badge.svg)](https://github.com/Arab-Open-Source/Marsad/actions/workflows/ci.yml) [![Release](https://img.shields.io/badge/version-0.10.0-blue.svg)](RELEASE.md)
+
 A Phoenix LiveView server fleet management dashboard with a mini-OS desktop interface. Manage your VPS fleet through an elegant browser-based desktop with SSH terminal, file explorer, Docker container management, systemd service control, nginx configuration, and live metrics -- all wrapped in a polished, themeable UI and protected by a local admin login.
 
 ## Table of Contents
@@ -13,6 +15,7 @@ A Phoenix LiveView server fleet management dashboard with a mini-OS desktop inte
 - [Configuration](#configuration)
 - [Development](#development)
 - [Production Deployment](#production-deployment)
+- [Release 0.10.0](RELEASE.md)
 - [Security Notes](#security-notes)
 - [License](#license)
 
@@ -305,7 +308,9 @@ bin/marsad start
 
 ### Docker
 
-The application manages Docker containers on remote servers; the application itself can also be containerized. Ensure that `DATABASE_PATH` points to a persistent volume and that `MARSAD_VAULT_KEY` is preserved across restarts.
+The application manages Docker containers on remote servers; the application itself can also be containerized. Copy `.env.example` to `.env`, fill in `SECRET_KEY_BASE` and `MARSAD_VAULT_KEY`, then run `docker compose up -d --build`. The SQLite database lives in the persistent `marsad_data` volume.
+
+For cross-platform artifact builds, CI workflows, checksums and step-by-step installation on Linux, macOS and Windows, see the [0.10.0 release guide](RELEASE.md).
 
 ### Important Notes
 

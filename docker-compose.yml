@@ -1,0 +1,20 @@
+services:
+  marsad:
+    build: .
+    image: marsad:0.10.0
+    container_name: marsad
+    restart: unless-stopped
+    ports:
+      - "${PORT:-4000}:4000"
+    environment:
+      PHX_SERVER: "true"
+      PHX_HOST: ${PHX_HOST:-localhost}
+      PORT: "4000"
+      DATABASE_PATH: /data/marsad.db
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in .env}
+      MARSAD_VAULT_KEY: ${MARSAD_VAULT_KEY:?set MARSAD_VAULT_KEY in .env}
+    volumes:
+      - marsad_data:/data
+
+volumes:
+  marsad_data:

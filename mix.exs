@@ -4,7 +4,7 @@ defmodule Marsad.MixProject do
   def project do
     [
       app: :marsad,
-      version: "0.0.1",
+      version: "0.10.0",
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -91,6 +91,7 @@ defmodule Marsad.MixProject do
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind marsad", "esbuild marsad"],
       "assets.deploy": [
+        "compile",
         "tailwind marsad --minify",
         "esbuild marsad --minify",
         "phx.digest"

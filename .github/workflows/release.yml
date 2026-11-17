@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+      - name: Read version from mix.exs
+        id: version
+        run: |
+          VERSION=$(mix run -e 'IO.puts(Mix.Project.config()[:version])' --no-start)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.os }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      MIX_ENV: prod
+      # Build-time placeholders: runtime.exs validates presence/format, but the
+      # real values must be supplied by the operator when starting the release.
+      DATABASE_PATH: /tmp/marsad-release-build.db
+      SECRET_KEY_BASE: build-time-placeholder-secret-key-base-not-for-production-use-000000000000
+      MARSAD_VAULT_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Install asset tooling
+        run: mix assets.setup
+
+      - name: Build assets and digest
+        run: mix assets.deploy
+
+      - name: Build release
+        run: mix release
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT="marsad-${RELEASE_VERSION}-${{ runner.os }}-${{ runner.arch }}"
+          mkdir -p artifacts
+          tar -czf "artifacts/${ARTIFACT}.tar.gz" -C _build/prod/rel marsad
+          (cd artifacts && sha256sum "${ARTIFACT}.tar.gz" > "${ARTIFACT}.tar.gz.sha256")
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $artifact = "marsad-$env:RELEASE_VERSION-$($env:RUNNER_OS)-$($env:RUNNER_ARCH)"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Compress-Archive -Path "_build\prod\rel\marsad\*" -DestinationPath "artifacts\$artifact.zip" -Force
+          $hash = (Get-FileHash "artifacts\$artifact.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $artifact.zip" | Out-File "artifacts\$artifact.zip.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marsad-${{ needs.prepare.outputs.version }}-${{ matrix.os }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: marsad-${{ needs.prepare.outputs.version }}-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          gh release create "$TAG" artifacts/* \
+            --title "Marsad $TAG" \
+            --notes-file RELEASE.md

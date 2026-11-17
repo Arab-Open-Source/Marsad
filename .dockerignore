@@ -1,0 +1,17 @@
+_build/
+deps/
+artifacts/
+cover/
+.git/
+.github/
+.opencode/
+.elixir_ls/
+*.db
+*.db-shm
+*.db-wal
+erl_crash.dump
+test/
+docs/
+*.md
+!RELEASE.md
+.env
